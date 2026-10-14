@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+venv/
+env/
+.venv/
+
+# Database (optional to ignore or keep)
+git_trending.db-journal
+
+# IDE
+.vscode/
+.idea/
