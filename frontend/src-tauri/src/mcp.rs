@@ -46,6 +46,8 @@ fn tools() -> Value {
       {"name":"git_search_atualizar_repos","description":"Roda git pull --rebase em TODOS os repositorios git ja baixados na pasta GitHub configurada e resume o resultado (atualizados, em dia, erros). Nao baixa nada novo.",
        "inputSchema":{"type":"object","properties":{}}},
       {"name":"git_search_biblioteca","description":"Resumo da biblioteca local: quantos repositorios git, modelos, datasets e skills estao baixados, e quantos pedidos de agentes estao pendentes de aprovacao.",
+       "inputSchema":{"type":"object","properties":{}}},
+      {"name":"git_search_sugestoes","description":"Analisa os repositorios ja baixados (manifestos, dependencias, Git LFS) e devolve sugestoes automaticas de download derivadas do conhecimento do ecossistema: repos/modelos complementares que faltam na maquina. Nada baixa sozinho; use git_search_pedir_download para pedir um item sugerido.",
        "inputSchema":{"type":"object","properties":{}}}
     ])
 }
@@ -275,6 +277,29 @@ fn library(db_path: &Path) -> Result<Value, String> {
     }))
 }
 
+fn suggestions(db_path: &Path) -> Result<Value, String> {
+    let a = crate::stack::analyze(db_path)?;
+    let sugestoes: Vec<Value> = a
+        .suggestions
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "tipo": s.kind,
+                "dominio": s.domain,
+                "motivo": s.reason,
+                "a_partir_de": s.from_folders,
+                "ja_pedido": s.already_requested
+            })
+        })
+        .collect();
+    Ok(json!({
+        "pastas_escaneadas": a.scanned_folders,
+        "lfs_pendente": a.lfs_folders,
+        "sugestoes": sugestoes
+    }))
+}
+
 /// Trata uma mensagem JSON-RPC. `None` para notificacoes (sem resposta).
 pub fn handle(db_path: &Path, msg: &Value, agent: &mut String) -> Option<Value> {
     let id = msg.get("id").cloned()?;
@@ -311,6 +336,7 @@ pub fn handle(db_path: &Path, msg: &Value, agent: &mut String) -> Option<Value> 
                 "git_search_pedidos" => list_requests(db_path),
                 "git_search_atualizar_repos" => update_repos(),
                 "git_search_biblioteca" => library(db_path),
+                "git_search_sugestoes" => suggestions(db_path),
                 _ => return Some(fail(-32602, &format!("Ferramenta desconhecida: {name}"))),
             };
             match result {
@@ -376,7 +402,7 @@ mod tests {
             &mut agent,
         )
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 7);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 8);
 
         let call = |args: Value| {
             handle(&db_path, &json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"git_search_pedir_download","arguments":args}}), &mut String::from("claude-code")).unwrap()

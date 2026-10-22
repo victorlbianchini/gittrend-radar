@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Bell, BookOpen, Boxes, Bot, Compass, Cpu, Database, Download, FolderGit2, Bookmark, HardDrive, Settings, TrendingUp } from 'lucide-react';
+import { Bell, BookOpen, Boxes, Bot, Compass, Cpu, Database, Download, FolderGit2, Bookmark, HardDrive, Lightbulb, Settings, TrendingUp } from 'lucide-react';
 import Header from './components/Header';
 import CatalogView from './components/CatalogView';
 import SettingsModal from './components/SettingsModal';
 import DownloadsView from './components/DownloadsView';
 import DownloadedView from './components/DownloadedView';
-import AgentRequestsView from './components/AgentRequestsView';
+import AgentRequestsView from './components/AgentRequestsView';
+import StackSuggestionsView from './components/StackSuggestionsView';
 import RepoCard from './components/RepoCard';
 import Toast from './components/Toast';
 import { api } from './api';
@@ -121,12 +122,13 @@ export default function App() {
         <button type="button" className={`switcher-tab-btn ${utility === 'favorites' ? 'is-active' : ''}`} onClick={() => setUtility('favorites')}><Bookmark size={15} />Favoritos ({library.favorites.length})</button>
         <button type="button" className={`switcher-tab-btn ${utility === 'downloaded' ? 'is-active' : ''}`} onClick={() => setUtility('downloaded')}><HardDrive size={15} />Baixados ({totalDownloaded})</button>
         <button type="button" className={`switcher-tab-btn ${utility === 'downloads' ? 'is-active' : ''}`} onClick={() => setUtility('downloads')}><Download size={15} />Downloads</button>
-        <button type="button" className={`switcher-tab-btn ${utility === 'agents' ? 'is-active' : ''}`} onClick={() => { setUtility('agents'); refreshRequests(); }}><Bot size={15} />Pedidos dos agentes{pendingCount > 0 ? <span className="tab-badge">{pendingCount}</span> : null}</button>
+        <button type="button" className={`switcher-tab-btn ${utility === 'agents' ? 'is-active' : ''}`} onClick={() => { setUtility('agents'); refreshRequests(); }}><Bot size={15} />Pedidos dos agentes{pendingCount > 0 ? <span className="tab-badge">{pendingCount}</span> : null}</button>
+        <button type="button" className={`switcher-tab-btn ${utility === 'suggest' ? 'is-active' : ''}`} onClick={() => setUtility('suggest')}><Lightbulb size={15} />Sugestões da máquina</button>
         <button type="button" className="switcher-tab-btn" onClick={() => setSettingsOpen(true)}><Settings size={15} />Configurações</button>
       </div>
     </nav>
     {!utility && <nav aria-label={`Seções de ${DOMAINS.find((item) => item.id === domain).label}`} className="tabs-container" style={{ margin: '12px 0 20px', flexWrap: 'wrap' }}>{MODES.map(({ id, label, Icon }) => <button key={id} type="button" aria-current={modes[domain] === id ? 'page' : undefined} className={`tab-btn ${modes[domain] === id ? 'active' : ''}`} onClick={() => setModes((current) => ({ ...current, [domain]: id }))}><Icon size={15} />{label}</button>)}</nav>}
-    {utility === 'agents' ? <AgentRequestsView requests={agentRequests} onChanged={() => { refreshRequests(); refreshLibrary(); }} onNotice={notice} /> : utility === 'downloads' ? <DownloadsView onOpenFolder={openFolder} /> : utility === 'downloaded' ? <DownloadedView library={library} cardProps={cardProps} onOpenFolder={openFolder} directories={directories} onNotice={notice} onLibraryChanged={refreshLibrary} /> : utility === 'favorites' ? <LibraryGrid key="favorites" repos={library.favorites} cardProps={cardProps} /> : <CatalogView key={`${domain}-${modes[domain]}-${revision}`} domain={domain} mode={modes[domain]} cardProps={cardProps} onNotice={(message) => notice('info', 'Catálogo', message)} onOpenFolder={openFolder} />}
+    {utility === 'agents' ? <AgentRequestsView requests={agentRequests} onChanged={() => { refreshRequests(); refreshLibrary(); }} onNotice={notice} /> : utility === 'suggest' ? <StackSuggestionsView onNotice={notice} onChanged={refreshRequests} /> : utility === 'downloads' ? <DownloadsView onOpenFolder={openFolder} /> : utility === 'downloaded' ? <DownloadedView library={library} cardProps={cardProps} onOpenFolder={openFolder} directories={directories} onNotice={notice} onLibraryChanged={refreshLibrary} /> : utility === 'favorites' ? <LibraryGrid key="favorites" repos={library.favorites} cardProps={cardProps} /> : <CatalogView key={`${domain}-${modes[domain]}-${revision}`} domain={domain} mode={modes[domain]} cardProps={cardProps} onNotice={(message) => notice('info', 'Catálogo', message)} onOpenFolder={openFolder} />}
     <SettingsModal isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} onSaved={(value) => { setDirectories(value); refreshLibrary(); setRevision((n) => n + 1); notice('success', 'Configurações salvas', 'Os próximos downloads usarão as pastas escolhidas.'); }} />
     <Toast toasts={toasts} onDismiss={(id) => setToasts((list) => list.filter((item) => item.id !== id))} />
   </div>;

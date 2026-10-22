@@ -1,9 +1,2 @@
 @echo off
-title GitTrend Radar - Inicializador
-cd /d "%~dp0"
-echo ========================================================
-echo   Iniciando GitTrend Radar...
-echo   Atualizacao Diaria e Analise dos Melhores Repositorios
-echo ========================================================
-python run.py
-pause
+start "" "C:\Users\Bianchini\AppData\Local\GitTrend Radar\gittrend-radar.exe"

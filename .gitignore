@@ -1,16 +1,31 @@
-# Python
+# Build
+frontend/dist/
+frontend/src-tauri/target/
+frontend/src-tauri/gen/
+
+# Node / Rust
+node_modules/
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
+
+# Env e segredos
 .env
-venv/
-env/
-.venv/
+.env.*
+*.pem
 
-# Database (optional to ignore or keep)
-git_trending.db-journal
+# Dados locais
+*.db
+*.db-journal
 
-# IDE
+# IDE e logs
 .vscode/
 .idea/
+*.log
+
+# Artefatos internos do workspace (nao fazem parte do produto)
+_tmp_scan*
+tools/
+CHECKPOINT_CONTINUIDADE_*.md
+AUDITORIA_*.md
+PEDIDO_AUDITORIA_*.md
+INDICE_CONHECIMENTO.md

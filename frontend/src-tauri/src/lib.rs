@@ -12,6 +12,7 @@ mod settings;
 mod mcp;
 pub use mcp::run as run_mcp;
 mod skills;
+mod stack;
 mod summaries;
 
 use std::path::PathBuf;
@@ -879,9 +880,52 @@ async fn resolve_agent_request(state: State<'_>, id: i64, approve: bool) -> Resu
     .await?
 }
 
+/// Análise de stack dos repositórios baixados: manifestos locais, dependências
+/// órfãs e pendências de Git LFS, com sugestões automáticas de download.
 #[tauri::command]
-async fn update_downloaded_repos(_state: State<'_>) -> Result<Vec<local::PullOutcome>, String> {
+async fn analyze_local_stacks(state: State<'_>) -> Result<stack::StackAnalysis, String> {
+    let path = state.db_path.clone();
+    blocking(move || stack::analyze(&path)).await?
+}
+
+/// Registra uma sugestão de stack como pedido na fila "Pedidos dos agentes"
+/// (nada baixa sem aprovação no app).
+#[tauri::command]
+async fn request_stack_download(
+    state: State<'_>,
+    kind: String,
+    id: String,
+    reason: String,
+) -> Result<i64, String> {
+    let path = state.db_path.clone();
     blocking(move || {
+        let id = id.trim().trim_end_matches('/').to_string();
+        validate_model_id(&id)?;
+        let kind = match kind.as_str() {
+            "repo" | "model" => kind.clone(),
+            _ => return Err("Tipo deve ser repo ou model.".into()),
+        };
+        if kind == "repo" && id.split('/').count() != 2 {
+            return Err("Repositório deve estar no formato dono/nome.".into());
+        }
+        let conn = db::open(&path).map_err(|e| e.to_string())?;
+        let reason: String = reason.chars().take(300).collect();
+        db::add_agent_request(&conn, &kind, &id, false, "análise-de-stack", &reason)
+            .map_err(|e| e.to_string())
+    })
+    .await?
+}
+
+/// Instala o Git LFS via winget (se faltar) e roda `git lfs pull` nas pastas
+/// com ponteiros pendentes.
+#[tauri::command]
+async fn fix_lfs(state: State<'_>) -> Result<stack::LfsFixReport, String> {
+    let path = state.db_path.clone();
+    blocking(move || stack::fix_lfs(&path)).await?
+}
+
+#[tauri::command]
+async fn update_downloaded_repos(_state: State<'_>) -> Result<Vec<local::PullOutcome>, String> {    blocking(move || {
         let repos: Vec<String> = local::existing_dirs()
             .into_iter()
             .filter(|d| {
@@ -1098,7 +1142,10 @@ pub fn run() {
             get_summary_status,
             retry_summaries,
             queue_repo_summaries,
-            update_downloaded_repos
+            update_downloaded_repos,
+            analyze_local_stacks,
+            request_stack_download,
+            fix_lfs
         ])
         .run(tauri::generate_context!())
         .expect("erro ao iniciar o GitTrend Radar");
