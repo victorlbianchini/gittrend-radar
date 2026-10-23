@@ -1,16 +1,16 @@
 # INSTRUTIVO DE REPOSITORIO (IR)
-## GitTrend Radar (Git Search) v0.1.3
+## GitTrend Radar (Git Search) v0.1.7
 ### Formacao Vibe Coder | Bianchini Academy
 
 ---
 
 ## 1. Identificacao e Visao Geral
 
-O **GitTrend Radar** (conhecido no ecossistema como **Git Search**) e uma estacao de trabalho para desenvolvedores e Vibe Coders. O aplicativo rastreia diariamente as maiores tendencias do GitHub, modelos de inteligencia artificial no Hugging Face e skills de agentes autonomos, gerando resumos tecnicos sintetizados em portugues via IA local (Ollama) e oferecendo download direto com um unico clique.
+O **GitTrend Radar** (conhecido no ecossistema como **Git Search**) e uma estacao de trabalho para desenvolvedores e Vibe Coders. O aplicativo rastreia diariamente as maiores tendencias do GitHub, modelos de inteligencia artificial no Hugging Face, datasets de IA, servidores MCP e skills de agentes autonomos, gerando resumos tecnicos sintetizados em portugues via IA local (Ollama), analise de stack da maquina e oferecendo download direto com um unico clique.
 
-* **Versao:** 0.1.3 (Release Oficial de Outubro de 2026)
+* **Versao:** 0.1.7 (Release Oficial Atualizada de Outubro de 2026)
 * **Arquitetura:** Tauri 2 (Rust) + React 19 + Vite + SQLite + Ollama Local
-* **Tamanho do Instalador:** Apenas 4,39 MiB (Instalador NSIS nativo para Windows x64)
+* **Tamanho do Instalador:** Apenas 4,58 MiB (Instalador NSIS nativo para Windows x64)
 * **Objetivo de Aprendizado:** Ensinar como construir aplicacoes desktop ultra-rapidas, que consom menos de 60 MB de memoria RAM e operam modelos de linguagem locais em segundo plano.
 
 ---
@@ -34,7 +34,7 @@ Na Bianchini Academy, todo projeto de software e guiado pelo **Metodo CRIAR**:
 Se o aluno deseja apenas utilizar o aplicativo de imediato:
 
 1. Localize o instalador gerado no diretorio do projeto:
-   `frontend/src-tauri/target/release/bundle/nsis/GitTrend Radar_0.1.3_x64-setup.exe`
+   `frontend/src-tauri/target/release/bundle/nsis/GitTrend Radar_0.1.7_x64-setup.exe`
 2. De um duplo clique no arquivo para iniciar a instalacao automatica.
 3. Apos a conclusao, o icone estara disponivel no Menu Iniciar do Windows. Clique com o botao direito e selecione **Fixar na barra de tarefas**.
 
@@ -67,24 +67,35 @@ O Tauri compilara o backend Rust e abrira a janela nativa com Hot Module Replace
 
 ## 4. Como o Git Search Funciona por Dentro
 
-### A. As Tres Vitrines Principais
-
+### A. As Cinco Vitrines Principais
+ 
 1. **GitHub:**
    - **Tops:** Exibe a ultima coleta do GitHub Trending filtrada por estrelas acumuladas.
    - **Novidades de Hoje:** Mostra exclusivamente repositorios que entraram no ranking pela primeira vez na data atual.
    - **Explorar Todos:** Permite pesquisar qualquer termo, linguagem (`language:rust`, `language:python`) ou topico (`topic:mcp`).
    - **Acao Baixar:** Clona o repositorio diretamente para a pasta configurada.
 
-2. **Modelos de IA:**
+2. **Servidores MCP (Model Context Protocol):**
+   - Rastreia servidores MCP oficiais e da comunidade no GitHub para conexao com Claude Desktop, Antigravity e agentes autonomos.
+
+3. **Modelos de IA:**
    - Monitora modelos em alta no Hugging Face e no GitHub.
    - Permite baixar o cartao do modelo com ou sem os pesos binarios, economizando espaco em disco quando o objetivo for apenas inspecionar a arquitetura.
 
-3. **Skills de Agentes:**
+4. **Datasets de IA:**
+   - Descoberta automatica de bases de treino e fine-tuning no Hugging Face com resolucao de formatos, modalidades e download direto.
+
+5. **Skills de Agentes:**
    - Busca catalogos publicos de skills (Anthropic, OpenAI e skills.sh).
-   - Baixa a pasta organizada no formato `<autor>/<repo>/<skill>` para ser utilizada em agentes como Antigravity, Claude Code e Codex.
+   - Baixa a pasta organizada no formato `<autor>/<repo>/<skill>` para ser utilizada em agentes.
 
-### B. Resumo Inteligente com IA Local
+### B. Sugestoes da Maquina e Analise de Stack Local
+O aplicativo analisa seus projetos locais em `E:\REPOSITORIOS`:
+- Detecta os manifestos (`package.json`, `Cargo.toml`, `requirements.txt`, etc.).
+- Identifica se ha dependencias que possuem repositorios ou modelos recomendados complementares.
+- Detecta pendencias de Git LFS e permite corrigir em 1 clique.
 
+### C. Resumo Inteligente com IA Local
 O aplicativo nao envia os dados para APIs na nuvem. Em vez disso, ele utiliza uma fila controlada que consulta o **Ollama** rodando localmente:
 
 * **Tamanho maximo lido:** 3.200 caracteres de documentacao (README.md ou SKILL.md).
@@ -102,8 +113,11 @@ Para aprender e exercitar a programacao, o aluno deve explorar os seguintes arqu
 | **Ponto de Entrada Rust** | `src-tauri/src/lib.rs` | Registra os comandos Tauri, inicializa o banco SQLite e orquestra a sincronizacao a cada 4 horas. |
 | **Integracao GitHub** | `src-tauri/src/github.rs` | Realiza o scraping do GitHub Trending e consultas a API oficial. |
 | **Catalogos e Modelos** | `src-tauri/src/catalog.rs` | Conecta com o Hugging Face e catalogos de skills publicas. |
+| **Datasets de IA** | `src-tauri/src/datasets.rs` | Parser de datasets do Hugging Face e suporte a download direto. |
+| **Analise de Stack** | `src-tauri/src/stack.rs` | Varre manifestos locais, analisa dependencias e sugere repositorios/modelos ideais. |
 | **Motor de IA Local** | `src-tauri/src/summaries.rs` | Gerencia a fila de resumos com Ollama e armazena respostas no banco. |
 | **Card de Exibicao** | `src/components/ContentCard.jsx` | Componente visual do card com estados de download, resumo e expansao de detalhes. |
+| **Sugestoes da Maquina** | `src/components/StackSuggestionsView.jsx` | Interface de visualizacao das sugestoes da maquina baseadas no ecossistema local. |
 | **Construtor de Detalhes** | `src/components/cardDetails.js` | Formata descricao, veredito, publico-alvo e fatos tecnicos do projeto. |
 
 ---

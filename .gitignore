@@ -24,6 +24,7 @@ __pycache__/
 
 # Artefatos internos do workspace (nao fazem parte do produto)
 _tmp_scan*
+_pack_*
 tools/
 CHECKPOINT_CONTINUIDADE_*.md
 AUDITORIA_*.md

@@ -1,6 +1,6 @@
 [package]
 name = "gittrend-radar"
-version = "0.1.6"
+version = "0.1.7"
 description = "GitTrend Radar"
 authors = ["Victor Bianchini"]
 license = ""
