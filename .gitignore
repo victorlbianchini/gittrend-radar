@@ -11,6 +11,7 @@ __pycache__/
 # Env e segredos
 .env
 .env.*
+.dev.vars
 *.pem
 
 # Dados locais

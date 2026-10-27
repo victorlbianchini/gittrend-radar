@@ -14,6 +14,10 @@ pub struct Repo {
     pub stars: i64,
     pub forks: i64,
     pub stars_today: i64,
+    #[serde(default)]
+    pub stars_per_day: i64,
+    #[serde(default)]
+    pub repo_created_at: String,
     pub category: String,
     pub rank: i64,
 }
@@ -77,6 +81,10 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
             sync_time TEXT, date_str TEXT, repos_found INTEGER, status TEXT, message TEXT,
             duration_sec REAL);",
     )?;
+    let _ = conn.execute(
+        "ALTER TABLE repositories ADD COLUMN repo_created_at TEXT DEFAULT ''",
+        [],
+    );
     Ok(conn)
 }
 
@@ -95,12 +103,13 @@ pub fn save_repos_period(
     {
         let mut st = tx.prepare(
             "INSERT INTO repositories (repo_id, owner, name, description, url, language, stars, forks,
-                stars_today, period, category, date_collected, rank)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?13, ?10, ?11, ?12)
+                stars_today, period, category, date_collected, rank, repo_created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?13, ?10, ?11, ?12, ?14)
              ON CONFLICT(repo_id, date_collected, period) DO UPDATE SET
                 description = excluded.description, stars = excluded.stars, forks = excluded.forks,
                 stars_today = excluded.stars_today, language = excluded.language,
-                category = excluded.category, rank = excluded.rank",
+                category = excluded.category, rank = excluded.rank,
+                repo_created_at = CASE WHEN excluded.repo_created_at != '' THEN excluded.repo_created_at ELSE repositories.repo_created_at END",
         )?;
         for r in repos {
             st.execute(params![
@@ -116,7 +125,8 @@ pub fn save_repos_period(
                 r.category,
                 date,
                 r.rank,
-                period
+                period,
+                r.repo_created_at
             ])?;
         }
     }
@@ -179,7 +189,7 @@ pub fn trends(conn: &Connection) -> rusqlite::Result<Vec<(Repo, String, Option<A
         "SELECT r.repo_id, r.owner, r.name, r.description, r.url, r.language, r.stars, r.forks,
                 r.stars_today, r.category, r.rank,
                 COALESCE((SELECT MIN(r2.date_collected) FROM repositories r2 WHERE r2.repo_id = r.repo_id AND r2.period = 'daily'), r.date_collected),
-                a.data
+                a.data, COALESCE(r.repo_created_at, '')
          FROM repositories r LEFT JOIN repo_analysis a ON a.repo_id = r.repo_id
          WHERE r.date_collected = ?1 AND r.period = 'daily'
          ORDER BY r.stars_today DESC, r.stars DESC",
@@ -191,6 +201,13 @@ pub fn trends(conn: &Connection) -> rusqlite::Result<Vec<(Repo, String, Option<A
 type Row = (Repo, String, Option<Analysis>);
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<Row> {
+    let stars: i64 = r.get(6)?;
+    let repo_created_at: String = r.get::<_, Option<String>>(13)?.unwrap_or_default();
+    let stars_per_day = crate::github::compute_stars_per_day(
+        stars,
+        &repo_created_at,
+        chrono::Local::now().date_naive(),
+    );
     Ok((
         Repo {
             repo_id: r.get(0)?,
@@ -201,9 +218,11 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Row> {
             language: r
                 .get::<_, Option<String>>(5)?
                 .unwrap_or_else(|| "Unknown".into()),
-            stars: r.get(6)?,
+            stars,
             forks: r.get(7)?,
             stars_today: r.get(8)?,
+            stars_per_day,
+            repo_created_at,
             category: r.get(9)?,
             rank: r.get(10)?,
         },
@@ -219,7 +238,7 @@ pub fn all_latest(conn: &Connection) -> rusqlite::Result<Vec<Row>> {
         "SELECT r.repo_id, r.owner, r.name, r.description, r.url, r.language, r.stars, r.forks,
                 r.stars_today, r.category, r.rank,
                 COALESCE((SELECT MIN(r2.date_collected) FROM repositories r2 WHERE r2.repo_id = r.repo_id AND r2.period = 'daily'), ''),
-                a.data
+                a.data, COALESCE(r.repo_created_at, '')
          FROM repositories r LEFT JOIN repo_analysis a ON a.repo_id = r.repo_id
          WHERE r.rowid = (SELECT r3.rowid FROM repositories r3 WHERE r3.repo_id = r.repo_id
              ORDER BY r3.date_collected DESC, CASE WHEN r3.period = 'daily' THEN 0 ELSE 1 END LIMIT 1)

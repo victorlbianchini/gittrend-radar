@@ -33,8 +33,8 @@ fn sync_script() -> PathBuf {
 fn tools() -> Value {
     let domain = json!({"type":"string","enum":["github","mcp","modelos","datasets","skills"],"description":"github = repositorios; mcp = servidores MCP; modelos = Hugging Face; datasets = datasets HF; skills = skills de agentes (SKILL.md)"});
     json!([
-      {"name":"git_search_tops","description":format!("Tops e novidades do dia do GitTrend Radar (GitHub Trending, Servidores MCP, modelos e datasets em alta no Hugging Face, skills mais instaladas). {UNTRUSTED}"),
-       "inputSchema":{"type":"object","properties":{"dominio":domain,"modo":{"type":"string","enum":["tops","novidades"],"default":"tops"},"limite":{"type":"integer","minimum":1,"maximum":50,"default":15}},"required":["dominio"]}},
+      {"name":"git_search_tops","description":format!("Tops, novidades do dia e foguetes em explosao (ultimos 7 dias por estrelas/dia) do GitTrend Radar (GitHub, Servidores MCP, modelos e datasets em alta no Hugging Face, skills mais instaladas). {UNTRUSTED}"),
+       "inputSchema":{"type":"object","properties":{"dominio":domain,"modo":{"type":"string","enum":["tops","novidades","foguetes"],"default":"tops"},"dias":{"type":"integer","minimum":1,"maximum":30,"default":7,"description":"janela de dias para modo=foguetes no GitHub"},"limite":{"type":"integer","minimum":1,"maximum":50,"default":15}},"required":["dominio"]}},
       {"name":"git_search_buscar","description":format!("Busca em TODO o GitHub publico, Servidores MCP, em todos os modelos/datasets do Hugging Face ou nos catalogos de skills. A fonte limita resultados por busca. {UNTRUSTED}"),
        "inputSchema":{"type":"object","properties":{"dominio":domain,"busca":{"type":"string","minLength":2},"limite":{"type":"integer","minimum":1,"maximum":50,"default":15}},"required":["dominio","busca"]}},
       {"name":"git_search_instalar_skill","description":"Instala uma skill (pasta inteira com SKILL.md) direto no ecossistema de agentes em %USERPROFILE%\\.agents\\skills\\<nome> e roda sync-indexes.py. Nunca substitui skill existente com o mesmo nome. Use repo e nome vindos de git_search_buscar/git_search_tops (dominio skills).",
@@ -58,7 +58,8 @@ fn limit(args: &Value) -> usize {
 
 fn repo_json(r: &db::Repo, first_seen: Option<&str>, latest: &str) -> Value {
     json!({"id":r.repo_id,"url":r.url,"description":r.description,"language":r.language,"category":r.category,
-           "stars":r.stars,"stars_today":r.stars_today,"forks":r.forks,
+           "stars":r.stars,"stars_today":r.stars_today,"stars_per_day":r.stars_per_day,
+           "criado_em":r.repo_created_at,"forks":r.forks,
            "novo_hoje": first_seen.is_some_and(|f| f == latest)})
 }
 
@@ -74,38 +75,58 @@ fn skill_json(s: &skills::Skill) -> Value {
 
 fn tops(db_path: &Path, args: &Value) -> Result<Value, String> {
     let n = limit(args);
-    let news = args["modo"].as_str() == Some("novidades");
+    let modo = args["modo"].as_str().unwrap_or("tops");
+    let news = modo == "novidades";
+    let breakout = modo == "foguetes";
+    let days = args["dias"].as_i64().unwrap_or(7).clamp(1, 30);
     let http = github::client();
     Ok(match args["dominio"].as_str().unwrap_or_default() {
         "github" => {
-            let conn = db::open(db_path).map_err(|e| e.to_string())?;
-            let latest = db::latest_date(&conn).ok_or(
-                "Ainda nao ha coleta do Trending. Abra o GitTrend Radar uma vez para sincronizar.",
-            )?;
-            let rows = db::trends(&conn).map_err(|e| e.to_string())?;
-            let list: Vec<Value> = rows
-                .iter()
-                .filter(|(_, first, _)| !news || *first == latest)
-                .take(n)
-                .map(|(r, first, _)| repo_json(r, Some(first), &latest))
-                .collect();
-            json!({"data_coleta":latest,"itens":list})
+            if breakout {
+                let (repos, total) = github::fetch_breakout(&http, "", days, 20, 1, n as u32)?;
+                json!({"janela_dias":days,"total_na_fonte":total,"itens":repos.iter().map(|r| repo_json(r, None, "")).collect::<Vec<_>>()})
+            } else {
+                let conn = db::open(db_path).map_err(|e| e.to_string())?;
+                let latest = db::latest_date(&conn).ok_or(
+                    "Ainda nao ha coleta do Trending. Abra o GitTrend Radar uma vez para sincronizar.",
+                )?;
+                let rows = db::trends(&conn).map_err(|e| e.to_string())?;
+                let list: Vec<Value> = rows
+                    .iter()
+                    .filter(|(_, first, _)| !news || *first == latest)
+                    .take(n)
+                    .map(|(r, first, _)| repo_json(r, Some(first), &latest))
+                    .collect();
+                json!({"data_coleta":latest,"itens":list})
+            }
         }
         "mcp" => {
-            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-            let q = if news {
-                format!("mcp server in:name,description created:>={today}")
+            if breakout {
+                let (repos, total) = github::fetch_breakout(
+                    &http,
+                    "mcp server in:name,description",
+                    30,
+                    2,
+                    1,
+                    n as u32,
+                )?;
+                json!({"janela_dias":30,"total_na_fonte":total,"itens":repos.iter().map(|r| repo_json(r, None, "")).collect::<Vec<_>>()})
             } else {
-                "mcp server in:name,description".to_string()
-            };
-            let sort = if news { "updated" } else { "stars" };
-            let (repos, total) = github::search_repos(&http, &q, sort, 1, n as u32)?;
-            json!({"total_na_fonte":total,"itens":repos.iter().map(|r| repo_json(r, None, "")).collect::<Vec<_>>()})
+                let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                let q = if news {
+                    format!("mcp server in:name,description created:>={today}")
+                } else {
+                    "mcp server in:name,description".to_string()
+                };
+                let sort = if news { "updated" } else { "stars" };
+                let (repos, total) = github::search_repos(&http, &q, sort, 1, n as u32)?;
+                json!({"total_na_fonte":total,"itens":repos.iter().map(|r| repo_json(r, None, "")).collect::<Vec<_>>()})
+            }
         }
         "modelos" => {
             let list: Vec<Value> = models::fetch_trending(&http)?
                 .iter()
-                .filter(|m| !news || m.is_new)
+                .filter(|m| (!news && !breakout) || m.is_new)
                 .take(n)
                 .map(model_json)
                 .collect();
@@ -117,7 +138,7 @@ fn tops(db_path: &Path, args: &Value) -> Result<Value, String> {
             let list: Vec<Value> = page
                 .models
                 .iter()
-                .filter(|m| !news || m.is_new)
+                .filter(|m| (!news && !breakout) || m.is_new)
                 .take(n)
                 .map(model_json)
                 .collect();
@@ -129,7 +150,7 @@ fn tops(db_path: &Path, args: &Value) -> Result<Value, String> {
                 .take(n)
                 .map(skill_json)
                 .collect();
-            json!({"fonte":"catalogos de skills (instalacoes/estrelas)","aviso":if news {"Fontes de skills nao informam data de lancamento; mostrando as mais instaladas."} else {""},"itens":list})
+            json!({"fonte":"catalogos de skills (instalacoes/estrelas)","aviso":if news || breakout {"Fontes de skills nao informam data de lancamento; mostrando as mais instaladas."} else {""},"itens":list})
         }
         _ => return Err("dominio deve ser github, mcp, modelos, datasets ou skills".into()),
     })

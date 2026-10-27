@@ -257,6 +257,8 @@ pub fn parse_trending(html: &str) -> Vec<Repo> {
                     .next()
                     .map(|e| parse_number(&text(e)))
                     .unwrap_or(0),
+                stars_per_day: 0,
+                repo_created_at: String::new(),
                 stars: muted.first().map(|s| parse_number(s)).unwrap_or(0),
                 forks: muted.get(1).map(|s| parse_number(s)).unwrap_or(0),
                 owner: owner.into(),
@@ -288,6 +290,18 @@ fn fetch_trending(http: &Client, lang: &str) -> Vec<Repo> {
     }
 }
 
+/// Calcula a velocidade media real (estrelas/dia) somente quando `repo_created_at` oficial (YYYY-MM-DD) existe.
+pub fn compute_stars_per_day(stars: i64, repo_created_at: &str, today: chrono::NaiveDate) -> i64 {
+    if stars <= 0 || repo_created_at.is_empty() {
+        return 0;
+    }
+    let Ok(created) = chrono::NaiveDate::parse_from_str(repo_created_at, "%Y-%m-%d") else {
+        return 0;
+    };
+    let age_days = (today - created).num_days().max(1);
+    (stars + age_days / 2) / age_days
+}
+
 /// Repos criados nos ultimos 7 dias com mais estrelas: novidade de verdade, sem "estrelas hoje" (API nao informa).
 fn fetch_new_repos(http: &Client) -> Vec<Repo> {
     let since = (chrono::Local::now() - chrono::Duration::days(7))
@@ -302,6 +316,57 @@ fn fetch_new_repos(http: &Client) -> Vec<Repo> {
     )
     .map(|(r, _)| r)
     .unwrap_or_default()
+}
+
+/// Foguetes nascidos nas ultimas 48h com tracao imediata (>30 estrelas), capturando explosoes antes do corte de 100 estrelas.
+fn fetch_breakout_48h(http: &Client) -> Vec<Repo> {
+    let since = (chrono::Local::now() - chrono::Duration::days(2))
+        .format("%Y-%m-%d")
+        .to_string();
+    search_repos(
+        http,
+        &format!("created:>={since} stars:>=30"),
+        "stars",
+        1,
+        30,
+    )
+    .map(|(r, _)| r)
+    .unwrap_or_default()
+}
+
+/// Busca projetos recem-criados em explosao (ordenados por estrelas/dia reais derivadas de `created_at` oficial da API).
+pub fn fetch_breakout(
+    http: &Client,
+    query_prefix: &str,
+    days: i64,
+    min_stars: i64,
+    page: u32,
+    per_page: u32,
+) -> Result<(Vec<Repo>, i64), String> {
+    let days = days.clamp(1, 90);
+    let since = (chrono::Local::now() - chrono::Duration::days(days))
+        .format("%Y-%m-%d")
+        .to_string();
+    let mut parts = Vec::new();
+    let trimmed = query_prefix.trim();
+    if !trimmed.is_empty() {
+        parts.push(trimmed.to_string());
+    }
+    parts.push(format!("created:>={since}"));
+    if min_stars > 0 {
+        parts.push(format!("stars:>={min_stars}"));
+    }
+    let q = parts.join(" ");
+    let (mut repos, total) = search_repos(http, &q, "stars", page, per_page)?;
+    repos.sort_by(|a, b| {
+        (b.stars_per_day, b.stars)
+            .cmp(&(a.stars_per_day, a.stars))
+            .then(a.repo_id.cmp(&b.repo_id))
+    });
+    for (i, r) in repos.iter_mut().enumerate() {
+        r.rank = ((page.saturating_sub(1) * per_page) as i64) + i as i64 + 1;
+    }
+    Ok((repos, total))
 }
 
 /// GET na API do GitHub com o token das configuracoes (se houver). Token so vai para api.github.com.
@@ -384,6 +449,7 @@ pub fn search_repos(
         ));
     }
     let total = json["total_count"].as_i64().unwrap_or(0);
+    let today_date = chrono::Local::now().date_naive();
     let repos = json["items"]
         .as_array()
         .into_iter()
@@ -393,14 +459,23 @@ pub fn search_repos(
             let (owner, name) = repo_id.split_once('/')?;
             let description = it["description"].as_str().unwrap_or_default().to_string();
             let language = it["language"].as_str().unwrap_or("Unknown").to_string();
+            let stars = it["stargazers_count"].as_i64().unwrap_or(0);
+            let repo_created_at = it["created_at"]
+                .as_str()
+                .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+                .map(|dt| dt.with_timezone(&chrono::Local).date_naive().to_string())
+                .unwrap_or_default();
+            let stars_per_day = compute_stars_per_day(stars, &repo_created_at, today_date);
             Some(Repo {
                 category: detect_category(&repo_id, &description, &language),
                 owner: owner.into(),
                 name: name.into(),
                 url: format!("https://github.com/{repo_id}"),
-                stars: it["stargazers_count"].as_i64().unwrap_or(0),
+                stars,
                 forks: it["forks_count"].as_i64().unwrap_or(0),
                 stars_today: 0,
+                stars_per_day,
+                repo_created_at,
                 rank: 0,
                 repo_id,
                 description,
@@ -411,18 +486,29 @@ pub fn search_repos(
     Ok((repos, total))
 }
 
-/// Trending geral + por linguagem + repos novos da semana, sem duplicados.
+/// Trending geral + por linguagem + repos novos da semana + foguetes de 48h, sem duplicados.
 pub fn collect_all(http: &Client) -> Vec<Repo> {
     let mut by_id: HashMap<String, Repo> = HashMap::new();
     let sources = std::iter::once("").chain(LANGUAGES.iter().copied());
     for r in sources
         .flat_map(|l| fetch_trending(http, l))
         .chain(fetch_new_repos(http))
+        .chain(fetch_breakout_48h(http))
     {
-        by_id.entry(r.repo_id.clone()).or_insert(r);
+        by_id
+            .entry(r.repo_id.clone())
+            .and_modify(|existing| {
+                if existing.repo_created_at.is_empty() && !r.repo_created_at.is_empty() {
+                    existing.repo_created_at = r.repo_created_at.clone();
+                    existing.stars_per_day = r.stars_per_day;
+                }
+            })
+            .or_insert(r);
     }
     let mut all: Vec<Repo> = by_id.into_values().collect();
-    all.sort_by(|a, b| (b.stars_today, b.stars).cmp(&(a.stars_today, a.stars)));
+    all.sort_by(|a, b| {
+        (b.stars_today, b.stars_per_day, b.stars).cmp(&(a.stars_today, a.stars_per_day, a.stars))
+    });
     for (i, r) in all.iter_mut().enumerate() {
         r.rank = i as i64 + 1;
     }
@@ -482,5 +568,14 @@ mod tests {
             (r.language.as_str(), r.category.as_str()),
             ("Rust", "devops_cli")
         );
+    }
+
+    #[test]
+    fn computes_real_stars_per_day_only_with_valid_date() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        assert_eq!(compute_stars_per_day(500, "", today), 0);
+        assert_eq!(compute_stars_per_day(0, "2026-10-25", today), 0);
+        assert_eq!(compute_stars_per_day(600, "2026-10-25", today), 300);
+        assert_eq!(compute_stars_per_day(250, "2026-10-27", today), 250);
     }
 }

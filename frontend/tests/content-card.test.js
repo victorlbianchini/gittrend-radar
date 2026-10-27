@@ -142,3 +142,14 @@ test('title shows only the project name, never owner/name', () => {
   assert.match(html, /Resumo traduzido/);
   assert.doesNotMatch(html, /Descrição original/);
 });
+
+test('breakout repositories display real stars/day velocity only when stars_today is absent', () => {
+  const breakoutItem = {
+    ...fixtures[0],
+    published_at: '2026-10-25',
+    repo: { owner: 'demo', name: 'rocket', stars: 900, stars_today: 0, stars_per_day: 450 },
+  };
+  const html = render(breakoutItem);
+  assert.match(html, /\+450<\/strong> est\.\/dia/);
+  assert.doesNotMatch(html, /hoje/);
+});

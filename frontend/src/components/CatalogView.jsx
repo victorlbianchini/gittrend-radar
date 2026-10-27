@@ -1,9 +1,19 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { HardDrive, Loader2, RefreshCw, Search, Sparkles } from 'lucide-react';
+import { HardDrive, Loader2, RefreshCw, Search } from 'lucide-react';
 import { api } from '../api';
 import useSummaries from '../hooks/useSummaries';
 import { summaryKey } from '../hooks/summaryState';
 import ContentCard from './ContentCard';
+
+function RadarBadgeIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth="1.4" strokeOpacity="0.55" />
+      <circle cx="8" cy="8" r="2.6" fill="currentColor" />
+      <path d="M8 1.75V4.2M14.25 8H11.8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  );
+}
 
 const EMPTY = [];
 const labels = {
@@ -222,7 +232,7 @@ export default function CatalogView({ domain, mode, cardProps = {}, onNotice, on
     {busy ? <p role="status" className="glass-panel catalog-v2-empty"><Loader2 size={20} className="animate-spin" />Carregando {labels[domain]}…</p> : displayItems.length === 0 ? <p className="glass-panel catalog-v2-empty">{requestError ? 'A consulta falhou. Use Atualizar para tentar novamente.' : downloadFilter === 'downloaded' ? 'Nenhum item baixado nesta página do catálogo.' : downloadFilter === 'unDownloaded' ? 'Todos os itens desta página já foram baixados!' : 'Nenhum resultado nesta categoria e período.'}</p> : <div className="repo-grid-luxury">
       {displayItems.map((item, index) => {
         const record = summaries.records[summaryKey(item)] || item.summary;
-        const rank = mode === 'tops' ? (position.page - 1) * 50 + index + 1 : undefined;
+        const rank = (mode === 'tops' || mode === 'breakout') ? (position.page - 1) * 50 + index + 1 : undefined;
         const isDl = isItemDownloaded(item);
         const prevIsDl = index > 0 ? isItemDownloaded(displayItems[index - 1]) : null;
 
@@ -232,7 +242,7 @@ export default function CatalogView({ domain, mode, cardProps = {}, onNotice, on
             if (index === 0 && !isDl) {
               divider = (
                 <div key="group-new" className="catalog-group-divider">
-                  <span className="catalog-group-title"><Sparkles size={15} /> Novos / Disponíveis para baixar</span>
+                  <span className="catalog-group-title"><RadarBadgeIcon /> Novos / Disponíveis para baixar</span>
                   <span className="catalog-group-count">{newCountOnPage} itens</span>
                 </div>
               );
@@ -255,7 +265,7 @@ export default function CatalogView({ domain, mode, cardProps = {}, onNotice, on
             } else if (!isDl && prevIsDl === true) {
               divider = (
                 <div key="group-new" className="catalog-group-divider">
-                  <span className="catalog-group-title"><Sparkles size={15} /> Novos / Disponíveis para baixar</span>
+                  <span className="catalog-group-title"><RadarBadgeIcon /> Novos / Disponíveis para baixar</span>
                   <span className="catalog-group-count">{newCountOnPage} itens</span>
                 </div>
               );

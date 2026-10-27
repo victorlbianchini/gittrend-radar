@@ -158,6 +158,7 @@ export default function ContentCard({
 
   const metrics = [
     [repo?.stars_today, "hoje", "hot", "+"],
+    [repo?.stars_today ? 0 : repo?.stars_per_day, "est./dia", "hot", "+"],
     [repo?.stars ?? skill?.stars, "estrelas"],
     [repo?.forks, "forks"],
     [model?.likes, "curtidas"],

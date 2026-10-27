@@ -84,7 +84,7 @@ impl CatalogRequest {
         if !["github", "models", "skills", "mcp", "datasets"].contains(&self.domain.as_str()) {
             return Err("Categoria de catálogo inválida.".into());
         }
-        if !["tops", "news", "explore"].contains(&self.mode.as_str()) {
+        if !["tops", "news", "breakout", "explore"].contains(&self.mode.as_str()) {
             return Err("Modo de catálogo inválido.".into());
         }
         if self.source.is_empty() {
@@ -118,7 +118,7 @@ impl CatalogRequest {
         {
             return Err("Parâmetros de paginação ou busca inválidos.".into());
         }
-        if (self.domain == "github" && self.mode == "explore"
+        if (self.domain == "github" && (self.mode == "explore" || self.mode == "breakout")
             || self.domain == "mcp"
             || (self.domain == "models" || self.domain == "datasets") && self.source == "github")
             && self.page > 20
@@ -250,8 +250,60 @@ fn load_github(
     r: &CatalogRequest,
     today: &str,
 ) -> Result<CatalogPage, String> {
-    let remote = r.domain == "models" || r.domain == "datasets" || r.mode == "explore";
-    let (mut repos, has_more, total, notice, cats) = if remote {
+    let remote = r.domain == "models"
+        || r.domain == "datasets"
+        || r.mode == "explore"
+        || r.mode == "breakout";
+    let (mut repos, has_more, total, notice, cats) = if r.mode == "breakout" {
+        let base_q = if r.domain == "models" {
+            if r.query.is_empty() {
+                "large-language-model OR diffusion-model OR text-to-image in:name,description"
+                    .to_string()
+            } else {
+                format!("{} model in:name,description", r.query)
+            }
+        } else if r.domain == "datasets" {
+            if r.query.is_empty() {
+                "topic:dataset OR dataset in:name,description".to_string()
+            } else {
+                format!("{} dataset in:name,description", r.query)
+            }
+        } else {
+            r.query.clone()
+        };
+        let min_stars = if r.domain == "github" && r.query.is_empty() {
+            25
+        } else {
+            5
+        };
+        let days = if r.domain == "github" { 7 } else { 14 };
+        let since = (chrono::Local::now() - chrono::Duration::days(days))
+            .format("%Y-%m-%d")
+            .to_string();
+        let (repos, total) = github::fetch_breakout(
+            &github::client(),
+            &base_q,
+            days,
+            min_stars,
+            r.page,
+            PAGE_SIZE as u32,
+        )?;
+        db::save_repos_period(conn, &repos, today, "search").map_err(|e| e.to_string())?;
+        let cats = categories(repos.iter().map(|v| v.category.clone()));
+        let rows = repos
+            .into_iter()
+            .map(|repo| {
+                let a = db::get_analysis(conn, &repo.repo_id);
+                (repo, String::new(), a)
+            })
+            .collect();
+        let items = crate::to_items(conn, rows);
+        let notice = format!(
+            "Foguetes dos últimos {days} dias no GitHub (created:>={since}), ordenados por velocidade média (est./dia) a partir de stargazers_count e created_at oficiais da API."
+        );
+        let more = (r.page as i64) * (PAGE_SIZE as i64) < total.min(1000) && !items.is_empty();
+        (items, more, Some(total), notice, cats)
+    } else if remote {
         let mut q = if r.domain == "models" {
             if r.query.is_empty() {
                 "large-language-model OR diffusion-model OR text-to-image in:name,description"
@@ -351,7 +403,7 @@ fn load_github(
             category: repo.repo.category.clone(),
             source: "github".into(),
             first_seen: repo.first_seen.clone(),
-            published_at: String::new(),
+            published_at: repo.repo.repo_created_at.clone(),
             repo: Some(repo),
             model: None,
             skill: None,
@@ -397,10 +449,16 @@ fn load_models(
         if r.mode == "news" && model.created_at != today {
             continue;
         }
+        if r.mode == "breakout" && !model.is_new {
+            continue;
+        }
         if r.category.as_ref().is_some_and(|c| c != &model.group) {
             continue;
         }
-        model.is_new = model.created_at == today;
+        let published_today = model.created_at == today;
+        if r.mode != "breakout" {
+            model.is_new = published_today;
+        }
         let id = model.id.clone();
         let key = format!("hf:{id}");
         let first = observe(conn, "hf", &id, today)?;
@@ -433,7 +491,7 @@ fn load_models(
             summary,
         });
     }
-    Ok(CatalogPage{items,page:r.page,has_more,next_cursor:if has_more{page.next_cursor}else{None},total:None,notice:if r.mode=="news"{"Modelos criados hoje, conforme createdAt do Hugging Face. Categorias filtram a página atual."}else{"Modelos públicos do Hugging Face por tendência. Categorias filtram a página atual."}.into(),categories:cats})
+    Ok(CatalogPage{items,page:r.page,has_more,next_cursor:if has_more{page.next_cursor}else{None},total:None,notice:if r.mode=="news"{"Modelos criados hoje, conforme createdAt do Hugging Face. Categorias filtram a página atual."}else if r.mode=="breakout"{"Modelos lançados nos últimos 14 dias em maior tendência (trendingScore) no Hugging Face. Categorias filtram a página atual."}else{"Modelos públicos do Hugging Face por tendência. Categorias filtram a página atual."}.into(),categories:cats})
 }
 
 fn load_datasets(
@@ -463,10 +521,15 @@ fn load_datasets(
         if r.mode == "news" && model.created_at != today {
             continue;
         }
+        if r.mode == "breakout" && !model.is_new {
+            continue;
+        }
         if r.category.as_ref().is_some_and(|c| c != &model.group) {
             continue;
         }
-        model.is_new = model.created_at == today;
+        if r.mode != "breakout" {
+            model.is_new = model.created_at == today;
+        }
         let id = model.id.clone();
         let key = format!("dataset:{id}");
         let first = observe(conn, "dataset", &id, today)?;
@@ -511,6 +574,8 @@ fn load_datasets(
         total: None,
         notice: if r.mode == "news" {
             "Datasets criados hoje no Hugging Face. Categorias filtram a página atual.".into()
+        } else if r.mode == "breakout" {
+            "Datasets lançados nos últimos 14 dias em maior tendência (trendingScore) no Hugging Face. Categorias filtram a página atual.".into()
         } else {
             "Datasets públicos do Hugging Face por tendência. Categorias filtram a página atual.".into()
         },
@@ -524,23 +589,44 @@ fn load_mcp(
     r: &CatalogRequest,
     today: &str,
 ) -> Result<CatalogPage, String> {
-    let mut q = if r.query.is_empty() {
-        "mcp server in:name,description".into()
+    let base_q = if r.query.is_empty() {
+        "mcp server in:name,description".to_string()
     } else {
         format!("{} mcp server in:name,description", r.query)
     };
-    if r.mode == "news" {
-        q.push_str(&format!(" created:>={today}"));
-    }
-    let sort = if r.mode == "news" {
-        "updated"
-    } else if r.mode == "tops" || r.query.is_empty() {
-        "stars"
+    let (repos, total, notice) = if r.mode == "breakout" {
+        let since = (chrono::Local::now() - chrono::Duration::days(30))
+            .format("%Y-%m-%d")
+            .to_string();
+        let (repos, total) =
+            github::fetch_breakout(&github::client(), &base_q, 30, 2, r.page, PAGE_SIZE as u32)?;
+        (
+            repos,
+            total,
+            format!(
+                "Servidores MCP criados nos últimos 30 dias (created:>={since}), ordenados por velocidade média (est./dia)."
+            ),
+        )
     } else {
-        "best"
+        let mut q = base_q;
+        if r.mode == "news" {
+            q.push_str(&format!(" created:>={today}"));
+        }
+        let sort = if r.mode == "news" {
+            "updated"
+        } else if r.mode == "tops" || r.query.is_empty() {
+            "stars"
+        } else {
+            "best"
+        };
+        let (repos, total) =
+            github::search_repos(&github::client(), &q, sort, r.page, PAGE_SIZE as u32)?;
+        (
+            repos,
+            total,
+            "Servidores MCP (Model Context Protocol) públicos no GitHub para Claude Desktop, ALFRED, Cursor e agentes de IA. Categorias filtram a página atual.".to_string(),
+        )
     };
-    let (repos, total) =
-        github::search_repos(&github::client(), &q, sort, r.page, PAGE_SIZE as u32)?;
     db::save_repos_period(conn, &repos, today, "search").map_err(|e| e.to_string())?;
     let cats = categories(repos.iter().map(|v| v.category.clone()));
     let rows = repos
@@ -580,7 +666,7 @@ fn load_mcp(
             category: "Servidor MCP".into(),
             source: "github".into(),
             first_seen: repo.first_seen.clone(),
-            published_at: String::new(),
+            published_at: repo.repo.repo_created_at.clone(),
             repo: Some(repo),
             model: None,
             skill: None,
@@ -588,7 +674,6 @@ fn load_mcp(
         });
     }
     let more = (r.page as i64) * (PAGE_SIZE as i64) < total.min(1000) && !items.is_empty();
-    let notice = "Servidores MCP (Model Context Protocol) públicos no GitHub para Claude Desktop, ALFRED, Cursor e agentes de IA. Categorias filtram a página atual.".to_string();
     Ok(CatalogPage {
         items,
         page: r.page,
@@ -606,6 +691,9 @@ fn load_skills(
     r: &CatalogRequest,
     today: &str,
 ) -> Result<CatalogPage, String> {
+    let since_7d = (chrono::Local::now() - chrono::Duration::days(7))
+        .format("%Y-%m-%d")
+        .to_string();
     let mut pool = skill_pool(&r.query)?;
     pool.retain(|s| {
         r.source == "all"
@@ -617,7 +705,14 @@ fn load_skills(
     for s in pool {
         let first = observe(conn, "skill", &s.id, today)?;
         let category = github::detect_category(&s.name, &s.description, "");
-        if r.mode != "news" || discovered_today(&first, today) {
+        let keep = if r.mode == "news" {
+            discovered_today(&first, today)
+        } else if r.mode == "breakout" {
+            !first.is_empty() && first.as_str() >= since_7d.as_str()
+        } else {
+            true
+        };
+        if keep {
             rows.push((s, first, category));
         }
     }
@@ -660,7 +755,7 @@ fn load_skills(
             summary,
         });
     }
-    Ok(CatalogPage{items,page:r.page,has_more,next_cursor:None,total:Some(total),notice:if r.mode=="news"{"Skills descobertas hoje nesta instalação; a carga inicial também conta como descoberta, não como lançamento. As fontes não fornecem data de criação."}else{"Catálogo disponível em skills.sh e GitHub Anthropic/OpenAI, ordenado por instalações e estrelas informadas. A busca não cobre todas as skills da internet."}.into(),categories:cats})
+    Ok(CatalogPage{items,page:r.page,has_more,next_cursor:None,total:Some(total),notice:if r.mode=="news"{"Skills descobertas hoje nesta instalação; a carga inicial também conta como descoberta, não como lançamento. As fontes não fornecem data de criação."}else if r.mode=="breakout"{"Skills descobertas nos últimos 7 dias nesta instalação, ordenadas por instalações e estrelas. As fontes não fornecem data de criação."}else{"Catálogo disponível em skills.sh e GitHub Anthropic/OpenAI, ordenado por instalações e estrelas informadas. A busca não cobre todas as skills da internet."}.into(),categories:cats})
 }
 
 #[cfg(test)]
@@ -679,7 +774,10 @@ mod tests {
         r.page = 21;
         r.mode = "explore".into();
         assert!(r.validate().is_err());
+        r.mode = "breakout".into();
+        assert!(r.validate().is_err());
         r.page = 1;
+        assert!(r.validate().is_ok());
         r.source = "unknown".into();
         assert!(r.validate().is_err());
     }
