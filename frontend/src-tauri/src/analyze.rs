@@ -404,6 +404,7 @@ pub fn ollama_models(http: &Client) -> Option<Vec<String>> {
 
 pub fn best_model(models: &[String]) -> Option<String> {
     const PRIORITY: &[&str] = &[
+        "nemotron-bolt:e4b",
         "qwen3.5:4b",
         "qwen3:8b",
         "qwen2.5-coder:7b",
@@ -487,7 +488,7 @@ Responda exatamente neste formato:\n[RESUMO_SIMPLES]\n2 paragrafos simples: o qu
     );
     let v: serde_json::Value = http
         .post(format!("{OLLAMA}/api/generate"))
-        .json(&serde_json::json!({"model": model, "prompt": prompt, "stream": false}))
+        .json(&serde_json::json!({"model": model, "prompt": prompt, "stream": false, "think": false}))
         .timeout(Duration::from_secs(180))
         .send()
         .map_err(|e| format!("Ollama indisponivel: {e}"))?
@@ -539,6 +540,15 @@ mod tests {
 
     #[test]
     fn summary_model_priority_and_embedding_exclusion() {
+        let with_bolt = [
+            "nomic-embed-text:latest",
+            "qwen3.5:4b",
+            "nemotron-bolt:e4b",
+            "qwen3:8b",
+        ]
+        .map(str::to_owned);
+        assert_eq!(best_model(&with_bolt).as_deref(), Some("nemotron-bolt:e4b"));
+
         let models = [
             "nomic-embed-text:latest",
             "qwen3.5:4b",
