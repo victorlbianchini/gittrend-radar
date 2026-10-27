@@ -337,6 +337,59 @@ mod tests {
         drop(conn);
         let _ = std::fs::remove_file(&dir);
     }
+
+    #[test]
+    fn recovers_stale_requests_reconciling_verified_clones() {
+        let root = std::env::temp_dir().join(format!(
+            "gittrend-db-recover-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let cloned = root.join("Deepseek Harness").join(".git");
+        std::fs::create_dir_all(&cloned).unwrap();
+        std::fs::write(cloned.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            cloned.join("config"),
+            "[remote \"origin\"]\n\turl = https://github.com/deepseek-ai/deepseek-harness.git\n",
+        )
+        .unwrap();
+
+        let db_file = root.join("test.db");
+        let conn = open(&db_file).unwrap();
+        let id_ok = add_agent_request(
+            &conn,
+            "repo",
+            "deepseek-ai/deepseek-harness",
+            false,
+            "alfred",
+            "harness",
+        )
+        .unwrap();
+        let id_missing = add_agent_request(
+            &conn,
+            "repo",
+            "foo/bar-missing",
+            false,
+            "alfred",
+            "missing",
+        )
+        .unwrap();
+        set_agent_request(&conn, id_ok, "running", "Baixando...", "pending").unwrap();
+        set_agent_request(&conn, id_missing, "running", "Baixando...", "pending").unwrap();
+
+        let n = recover_stale_agent_requests_in(&conn, &root).unwrap();
+        assert_eq!(n, 2);
+
+        let r_ok = get_agent_request(&conn, id_ok).unwrap();
+        assert_eq!(r_ok.status, "done");
+        assert!(r_ok.message.contains("Deepseek Harness"));
+
+        let r_missing = get_agent_request(&conn, id_missing).unwrap();
+        assert_eq!(r_missing.status, "error");
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 /// Cache de explicacoes de modelos do Hugging Face e skills (kind = "hf" | "skill").
@@ -430,4 +483,44 @@ pub fn set_agent_request(conn: &Connection, id: i64, status: &str, message: &str
         params![id, status, message, only_from],
     )?;
     Ok(n == 1)
+}
+
+/// Recupera pedidos que ficaram presos em `running` se o app ou processo fechou no meio.
+pub fn recover_stale_agent_requests(conn: &Connection) -> rusqlite::Result<usize> {
+    recover_stale_agent_requests_in(conn, &crate::settings::github_dir())
+}
+
+pub(crate) fn recover_stale_agent_requests_in(
+    conn: &Connection,
+    github_dir: &std::path::Path,
+) -> rusqlite::Result<usize> {
+    let running: Vec<(i64, String, String)> = {
+        let mut s = conn.prepare(
+            "SELECT id, kind, target FROM agent_requests WHERE status = 'running'",
+        )?;
+        let rows = s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut updated = 0usize;
+    for (id, kind, target) in running {
+        if kind == "repo" {
+            if let Some(cloned_path) = crate::local::verified_clone_in(github_dir, &target) {
+                let msg = format!("Clonado em: {}", cloned_path.display());
+                if set_agent_request(conn, id, "done", &msg, "running")? {
+                    updated += 1;
+                }
+                continue;
+            }
+        }
+        if set_agent_request(
+            conn,
+            id,
+            "error",
+            "Download interrompido ao fechar o app. Clique em Tentar novamente para retomar.",
+            "running",
+        )? {
+            updated += 1;
+        }
+    }
+    Ok(updated)
 }

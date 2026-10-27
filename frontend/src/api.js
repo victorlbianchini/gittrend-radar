@@ -28,7 +28,8 @@ export const api = {
   downloadModel: (id, full = false) => invoke('download_model', { id, full }),
   skillsSearch: (query = '') => invoke('search_skills', { query }),
   explainSkill: (skill) => invoke('explain_skill', { skill }),
-  downloadSkill: (skill) => invoke('download_skill', { skill }),
+  downloadSkill: (skill) => invoke('download_skill', { skill }),
+  installEcosystemSkill: (skill) => invoke('install_ecosystem_skill', { skill }),
   downloads: () => invoke('get_downloads'),
   settings: () => invoke('get_settings'),
   saveSettings: (settings) => invoke('save_settings', settings),
@@ -46,7 +47,7 @@ export const api = {
 };
 
 // Links http(s) abrem no navegador padrao em vez de navegar dentro da janela do app
-document.addEventListener("click", (e) => {
+if (typeof document !== "undefined") document.addEventListener("click", (e) => {
   const a = e.target.closest?.('a[href^="http"]');
   if (!a) return;
   e.preventDefault();

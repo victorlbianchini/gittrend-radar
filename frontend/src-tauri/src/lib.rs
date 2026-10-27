@@ -832,6 +832,35 @@ async fn download_skill(skill: skills::Skill) -> Result<local::ActionResult, Str
 }
 
 #[tauri::command]
+async fn install_ecosystem_skill(skill: skills::Skill) -> Result<serde_json::Value, String> {
+    blocking(move || {
+        let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
+        let base = PathBuf::from(&home).join(".agents").join("skills");
+        std::fs::create_dir_all(&base)
+            .map_err(|e| format!("Pasta de skills do ecossistema indisponível: {e}"))?;
+        let result = skills::install_ecosystem(&github::client(), skill, &base)?;
+        let sync_script = PathBuf::from(&home).join(".agents").join("sync-indexes.py");
+        let sync = std::process::Command::new("python")
+            .arg(sync_script)
+            .output()
+            .map(|o| {
+                if o.status.success() {
+                    "sync-indexes.py executado".to_string()
+                } else {
+                    "sync-indexes.py retornou aviso".to_string()
+                }
+            })
+            .unwrap_or_else(|_| "sync-indexes.py não executado".into());
+        Ok(serde_json::json!({
+            "success": result.success,
+            "folder_path": result.folder_path,
+            "message": format!("{} ({})", result.message, sync)
+        }))
+    })
+    .await?
+}
+
+#[tauri::command]
 async fn list_agent_requests(state: State<'_>) -> Result<Vec<db::AgentRequest>, String> {
     let path = state.db_path.clone();
     blocking(move || {
@@ -866,9 +895,34 @@ async fn resolve_agent_request(state: State<'_>, id: i64, approve: bool) -> Resu
                 (if r.success { "done" } else { "error" }, r.message)
             }
             "model" | "dataset" => {
-                validate_model_id(&req.target)?;
-                match models::download(&github::client(), &req.target, req.full) {
-                    Ok(()) => ("done", "Download iniciado; acompanhe em Downloads.".to_string()),
+                if let Err(e) = validate_model_id(&req.target) {
+                    db::set_agent_request(&conn, id, "error", &e, "running").map_err(|e| e.to_string())?;
+                    return db::get_agent_request(&conn, id).ok_or_else(|| "Pedido não encontrado.".into());
+                }
+                db::set_agent_request(
+                    &conn,
+                    id,
+                    "running",
+                    "Baixando do Hugging Face; acompanhe em Downloads.",
+                    "running",
+                )
+                .map_err(|e| e.to_string())?;
+                let cb_db = path.clone();
+                let on_done = Box::new(move |ok: bool, msg: &str| {
+                    if let Ok(c) = db::open(&cb_db) {
+                        let _ = db::set_agent_request(
+                            &c,
+                            id,
+                            if ok { "done" } else { "error" },
+                            msg,
+                            "running",
+                        );
+                    }
+                });
+                match models::download_with_callback(&github::client(), &req.target, req.full, Some(on_done)) {
+                    Ok(()) => {
+                        return db::get_agent_request(&conn, id).ok_or_else(|| "Pedido não encontrado.".into());
+                    }
                     Err(e) => ("error", e),
                 }
             }
@@ -1074,6 +1128,7 @@ pub fn run() {
             settings::init(dir.join("settings.json"));
             let db_path = dir.join("gittrend.db");
             let conn = db::open(&db_path)?;
+            let _ = db::recover_stale_agent_requests(&conn);
             let mut status = SyncStatus {
                 message: "Ainda não sincronizado".into(),
                 ..Default::default()
@@ -1132,6 +1187,7 @@ pub fn run() {
             search_skills,
             explain_skill,
             download_skill,
+            install_ecosystem_skill,
             search_global,
             get_downloads,
             get_settings,

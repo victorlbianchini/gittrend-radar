@@ -136,6 +136,31 @@ pub fn find_downloaded<'a>(dirs: &'a [String], repo_id: &str, name: &str) -> Opt
     dirs.iter().find(|d| name_matches(d, name))
 }
 
+/// Retorna o caminho local apenas quando o clone git do `repo_id` está íntegro (`.git/HEAD` e remote batendo).
+pub(crate) fn verified_clone_in(base: &Path, repo_id: &str) -> Option<PathBuf> {
+    let name = repo_id.split('/').nth(1).unwrap_or(repo_id);
+    let rd = std::fs::read_dir(base).ok()?;
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let dir_name = entry.file_name().to_string_lossy().into_owned();
+        if !name_matches(&dir_name, name) {
+            continue;
+        }
+        if !path.join(".git/HEAD").is_file() {
+            continue;
+        }
+        if std::fs::read_to_string(path.join(".git/config"))
+            .is_ok_and(|cfg| remote_matches(&cfg, repo_id))
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
 fn remote_matches(config: &str, repo_id: &str) -> bool {
     config
         .lines()
@@ -240,12 +265,8 @@ pub fn clone_repo(url: &str, name: &str, custom: Option<&str>) -> ActionResult {
             .strip_suffix(".git")
             .unwrap_or(url.trim_end_matches('/'))
     );
-    let has_lfs = Command::new("git")
-        .args(["lfs", "version"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .is_ok_and(|o| o.status.success());
-    let mut cmd = Command::new("git");
+    let has_lfs = crate::stack::git_lfs_available();
+    let mut cmd = crate::stack::git_with_lfs_path();
     if !has_lfs {
         // Sem git-lfs instalado o filtro global quebra o checkout; clona com arquivos LFS como ponteiros
         cmd.args([
@@ -260,16 +281,36 @@ pub fn clone_repo(url: &str, name: &str, custom: Option<&str>) -> ActionResult {
     cmd.args(["clone", "-q", "--depth", "1", "--", &git_url])
         .arg(&folder)
         .current_dir(&base);
-    let lfs_note = if has_lfs {
-        ""
-    } else {
-        " (arquivos Git LFS ficaram como ponteiros: instale com `winget install GitHub.GitLFS` e rode `git lfs pull` na pasta)"
-    };
     match run_with_timeout(&mut cmd, Duration::from_secs(300)) {
-        Ok((true, _)) => ok(false, format!("Clonado em: {}{lfs_note}", target.display())),
+        Ok((true, _)) => {
+            spawn_codebase_index(&target);
+            let lfs_note = if !has_lfs && crate::stack::has_lfs_pointers(&target) {
+                " (arquivos Git LFS ficaram como ponteiros: instale com `winget install GitHub.GitLFS` e rode `git lfs pull` na pasta)"
+            } else {
+                ""
+            };
+            ok(false, format!("Clonado em: {}{lfs_note}", target.display()))
+        }
         Ok((false, err)) => ActionResult::fail(format!("Falha ao clonar: {err}")),
         Err(e) => ActionResult::fail(e),
     }
+}
+
+/// Dispara em background a indexacao automatica no codebase-memory-mcp (se instalado no sistema)
+/// para que qualquer agente ja consiga consultar o grafo do repositorio recem-clonado.
+fn spawn_codebase_index(repo_path: &Path) {
+    if cfg!(test) {
+        return;
+    }
+    let path_str = repo_path.display().to_string();
+    std::thread::spawn(move || {
+        let mut cmd = Command::new("codebase-memory-mcp");
+        cmd.args(["index", &path_str])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW);
+        let _ = cmd.status();
+    });
 }
 
 #[derive(Serialize, Clone)]
@@ -278,6 +319,8 @@ pub struct PullOutcome {
     /// "updated" | "up_to_date" | "error"
     pub status: String,
     pub message: String,
+    /// Commits novos puxados no pull (formato curto), quando houver atualizacao real
+    pub changelog: Vec<String>,
 }
 
 fn drain_pipe<R: std::io::Read + Send + 'static>(mut pipe: R) -> String {
@@ -302,6 +345,7 @@ pub fn pull_repo(dir: &str) -> PullOutcome {
         folder: dir.to_string(),
         status: status.into(),
         message: msg,
+        changelog: Vec::new(),
     };
     let Some(target) = safe_join(&base, dir) else {
         return fail("error", "Pasta invalida.".into());
@@ -309,6 +353,15 @@ pub fn pull_repo(dir: &str) -> PullOutcome {
     if !target.join(".git").is_dir() {
         return fail("error", "Nao e um repositorio git.".into());
     }
+    let old_head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&target)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
     let mut cmd = Command::new("git");
     cmd.args(["pull", "--rebase", "--autostash"])
         .current_dir(&target);
@@ -355,10 +408,35 @@ pub fn pull_repo(dir: &str) -> PullOutcome {
                     if text.contains("already up to date") || text.contains("atualizado") {
                         return fail("up_to_date", "Ja estava em dia.".into());
                     }
+                    let changelog = if !old_head.is_empty() {
+                        Command::new("git")
+                            .args(["log", &format!("{old_head}..HEAD"), "--oneline", "-n", "5"])
+                            .current_dir(&target)
+                            .creation_flags(CREATE_NO_WINDOW)
+                            .output()
+                            .ok()
+                            .filter(|o| o.status.success())
+                            .map(|o| {
+                                String::from_utf8_lossy(&o.stdout)
+                                    .lines()
+                                    .map(|l| l.trim().to_string())
+                                    .filter(|l| !l.is_empty())
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    let msg = if !changelog.is_empty() {
+                        format!("{} novo(s): {}", changelog.len(), changelog.join(" · "))
+                    } else {
+                        summary.trim().to_string()
+                    };
                     return PullOutcome {
                         folder: dir.to_string(),
                         status: "updated".into(),
-                        message: summary.trim().to_string(),
+                        message: msg,
+                        changelog,
                     };
                 }
                 let err = if stderr.is_empty() { stdout } else { stderr };

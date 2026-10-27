@@ -1,6 +1,7 @@
-import React, { useId, useState } from "react";
+import React, { useEffect, useId, useState } from "react";
 import {
   Bookmark,
+  BookOpen,
   Check,
   Download,
   ExternalLink,
@@ -9,6 +10,7 @@ import {
   Loader2,
   RefreshCw,
 } from "lucide-react";
+import { api } from "../api";
 import { cardDetails } from "./cardDetails";
 import OwnerAvatar from "./OwnerAvatar";
 
@@ -56,10 +58,64 @@ export default function ContentCard({
   const [localPath, setLocalPath] = useState("");
   const [full, setFull] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [modelMeta, setModelMeta] = useState(null);
+  const [installingSkill, setInstallingSkill] = useState(false);
   const detailsId = useId();
   const repo = item.repo;
   const model = item.model;
   const skill = item.skill;
+  const isSkillRepo = Boolean(
+    repo &&
+      !skill &&
+      (repo.repo_id?.toLowerCase().includes("skill") ||
+        repo.description?.toLowerCase().includes("skill.md") ||
+        repo.description?.toLowerCase().includes("agent skill") ||
+        repo.description?.toLowerCase().includes("claude skill") ||
+        repo.description?.toLowerCase().includes("skills system")),
+  );
+
+  useEffect(() => {
+    if (!expanded || !model || modelMeta) return;
+    let active = true;
+    api
+      .modelFiles(model.id)
+      .then((info) => {
+        if (active) setModelMeta(info);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [expanded, model, modelMeta]);
+
+  async function installRepoAsSkill() {
+    if (!repo) return;
+    setInstallingSkill(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await api.installEcosystemSkill({
+        id: `${repo.repo_id}::${repo.name}`,
+        name: repo.name,
+        repo: repo.repo_id,
+        branch: "HEAD",
+        path: "",
+        description: repo.description || "",
+        stars: repo.stars || 0,
+        installs: 0,
+        sources: ["GitHub"],
+        github_url: repo.url || "",
+        is_downloaded: false,
+        downloaded_path: "",
+      });
+      if (result?.folder_path) setLocalPath(result.folder_path);
+      setNotice(result?.message || "Skill instalada no ecossistema.");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setInstallingSkill(false);
+    }
+  }
   const jobActive = downloadJob && !downloadJob.finished;
   const jobComplete = downloadJob?.finished && downloadJob.success;
   const jobFailure = downloadJob?.finished && !downloadJob.success;
@@ -316,6 +372,24 @@ export default function ContentCard({
             )}
             {facts.length > 0 && (
               <dl className="card-v2-facts">
+                {modelMeta?.vram_hint && (
+                  <>
+                    <dt>Hardware / VRAM</dt>
+                    <dd>{modelMeta.vram_hint}</dd>
+                  </>
+                )}
+                {modelMeta?.full_bytes > 0 && (
+                  <>
+                    <dt>Tamanho total</dt>
+                    <dd>{formatBytes(modelMeta.full_bytes)} ({modelMeta.full_count} arquivos)</dd>
+                  </>
+                )}
+                {modelMeta?.quantizations?.length > 0 && (
+                  <>
+                    <dt>Quantizações GGUF</dt>
+                    <dd>{modelMeta.quantizations.slice(0, 4).map(([name, sz]) => `${name} (${formatBytes(sz)})`).join(" · ")}</dd>
+                  </>
+                )}
                 {facts.map(([label, value]) => (
                   <React.Fragment key={label}>
                     <dt>{label}</dt>
@@ -395,6 +469,18 @@ export default function ContentCard({
           <Info size={14} />
           {expanded ? "Fechar detalhes" : "Detalhes"}
         </button>
+        {isSkillRepo && (
+          <button
+            type="button"
+            className="btn-details-glass"
+            disabled={installingSkill}
+            onClick={installRepoAsSkill}
+            title="Instalar SKILL.md deste repositório direto no ecossistema"
+          >
+            {installingSkill ? <Loader2 size={14} className="animate-spin" /> : <BookOpen size={14} />}
+            Instalar Skill
+          </button>
+        )}
         {path && onOpenFolder && (
           <button
             type="button"

@@ -124,7 +124,8 @@ export default function DownloadedView({
       const updated = results.filter((r) => r.status === 'updated').length;
       const upToDate = results.filter((r) => r.status === 'up_to_date').length;
       const errors = results.filter((r) => r.status === 'error');
-      onNotice?.(errors.length ? 'error' : 'success', 'Atualização em lote', `${updated} atualizado(s), ${upToDate} em dia, ${errors.length} com erro.`);
+      onNotice?.(errors.length ? 'error' : 'success', 'Atualização em lote', `${updated} atualizado(s), ${upToDate} em dia, ${errors.length} com erro.`);
+      results.filter((r) => r.status === 'updated' && r.message).slice(0, 4).forEach((r) => onNotice?.('info', `Novidades em ${r.folder}`, r.message));
       if (errors.length) {
         errors.slice(0, 3).forEach((r) => onNotice?.('error', r.folder, r.message));
       }

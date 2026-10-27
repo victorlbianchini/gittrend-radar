@@ -12,7 +12,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -20,7 +22,12 @@ use crate::{db, local};
 
 const MAX_DEP_LEN: usize = 64;
 const MAX_LFS_SAMPLE_FILES: usize = 400;
-const MAX_WALK_DEPTH: usize = 3;
+const MAX_WALK_DEPTH: usize = 2;
+const STACK_WORKERS: usize = 8;
+const SCAN_CACHE_TTL: Duration = Duration::from_secs(300);
+
+static SCAN_CACHE: LazyLock<Mutex<Option<(Instant, String, Vec<LocalStackReport>)>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 const SKIP_DIRS: &[&str] = &[
     ".git",
@@ -58,13 +65,6 @@ const SKIP_DIRS: &[&str] = &[
     ".pnpm-store",
     "DerivedData",
     "Pods",
-];
-
-const LFS_EXTS: &[&str] = &[
-    "bin", "pth", "ckpt", "safetensors", "gguf", "onnx", "wav", "mp3", "flac", "m4a", "ogg",
-    "mp4", "mov", "avi", "mkv", "webm", "zip", "tar", "gz", "bz2", "7z", "rar", "exe", "dll",
-    "so", "lib", "wasm", "npy", "npz", "parquet", "pickle", "pkl", "joblib", "model", "pt",
-    "h5", "hdf5", "tflite", "pb", "mindir", "vocab", "spm", "pak",
 ];
 
 #[derive(Serialize, Clone, Default)]
@@ -253,6 +253,27 @@ const RULES: &[(&str, &[Rule])] = &[
     ("yfinance", &[("repo", "ranaroussi/yfinance", "Trading e Finanças", "Dados do Yahoo Finance")]),
     ("talib", &[("repo", "TA-Lib/ta-lib-python", "Trading e Finanças", "Indicadores técnicos")]),
     ("chronos", &[("model", "amazon/chronos-t5-tiny", "Trading e Finanças", "Pesos Chronos para previsão de séries temporais")]),
+    // ---- Bianchini Academy ----
+    ("drizzleorm", &[
+        ("repo", "drizzle-team/drizzle-orm", "Bianchini Academy", "ORM TypeScript usado no banco da Bianchini Academy"),
+        ("repo", "Nutlope/hallmark", "Bianchini Academy", "Changelog e release notes interativos para vitrine de módulos da Academy"),
+    ]),
+    ("tanstackreactquery", &[
+        ("repo", "TanStack/query", "Bianchini Academy", "Sincronização de estado assíncrono no dashboard do aluno da Academy"),
+    ]),
+    ("sonner", &[
+        ("repo", "emilkowalski/sonner", "Bianchini Academy", "Sistema de toasts reativos da Bianchini Academy"),
+        ("repo", "pbakaus/impeccable", "Bianchini Academy", "Linguagem de design fluente para polimento de UI na Academy e Método CRIAR"),
+    ]),
+    // ---- Bianchini Dev ----
+    ("modelcontextprotocolsdk", &[
+        ("repo", "anthropics/sandbox-runtime", "Bianchini Dev", "Runtime de isolamento de execução para Bianchini Extensão e CodeScriptPlayground"),
+        ("repo", "headroomlabs-ai/headroom", "Bianchini Dev", "Otimização e compressão de contexto entre chamadas de LLM na Bianchini Extensão"),
+    ]),
+    ("vscode", &[
+        ("repo", "thedotmack/claude-mem", "Bianchini Dev", "Captura e compressão automática de sessões de coding para o ecossistema Bianchini Dev"),
+        ("repo", "cloudflare/security-audit-skill", "Bianchini Dev", "Auditoria automatizada de segurança para pacotes do Vibe Coder Master e Vitalício"),
+    ]),
 ];
 
 // Domínios: quando 2+ dependências do cluster aparecem no disco, sugerir as
@@ -328,6 +349,25 @@ const DOMAINS: &[Domain] = &[
             ("repo", "appwrite/appwrite", "Infra Self-hosted", "Backend completo self-hosted"),
             ("repo", "pocketbase/pocketbase", "Infra Self-hosted", "Backend embarcado em um executável"),
             ("repo", "minio/minio", "Infra Self-hosted", "Storage compatível com S3"),
+        ],
+    },
+    Domain {
+        name: "Bianchini Academy",
+        triggers: &["drizzleorm", "tanstackreactquery", "sonner", "remotion", "lucidereact", "supabasejs", "reactrouterdom"],
+        essentials: &[
+            ("repo", "heygen-com/hyperframes", "Bianchini Academy", "Motor HTML-to-video determinístico para vinhetas e aulas da Bianchini Academy"),
+            ("repo", "Nutlope/hallmark", "Bianchini Academy", "Changelog open source para o Diário de Engenharia e lançamentos do Vitalício"),
+            ("repo", "pbakaus/impeccable", "Bianchini Academy", "Comandos de design system para elevar interfaces no Método CRIAR"),
+        ],
+    },
+    Domain {
+        name: "Bianchini Dev",
+        triggers: &["vscode", "modelcontextprotocolsdk", "esbuild", "vitest", "playwright", "tauri"],
+        essentials: &[
+            ("repo", "anthropics/sandbox-runtime", "Bianchini Dev", "Sandbox leve para execução segura de código em Bianchini Extensão e Playgrounds"),
+            ("repo", "headroomlabs-ai/headroom", "Bianchini Dev", "Camada de otimização de contexto para agentes multi-modelo (MiMo, DeepSeek, Nemotron)"),
+            ("repo", "thedotmack/claude-mem", "Bianchini Dev", "Memória automática de sessões para continuidade entre turnos de engenharia"),
+            ("repo", "vectorize-io/hindsight", "Bianchini Dev", "Memória evolutiva de agentes para o ALFRED Aluno Starter Kit"),
         ],
     },
 ];
@@ -540,40 +580,56 @@ fn walk_manifests(dir: &Path, depth: usize, out: &mut Vec<(Vec<String>, Vec<Stri
 // Git LFS
 // ---------------------------------------------------------------------------
 
-fn git_lfs_available() -> bool {
-    static LFS: OnceLock<bool> = OnceLock::new();
-    *LFS.get_or_init(|| {
-        std::process::Command::new("git")
-            .args(["lfs", "version"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-    })
+pub(crate) fn git_with_lfs_path() -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+        let lfs_dir = Path::new(r"C:\Program Files\Git LFS");
+        if lfs_dir.is_dir() {
+            let current = std::env::var_os("PATH").unwrap_or_default();
+            let mut paths: Vec<PathBuf> = std::env::split_paths(&current).collect();
+            if !paths.iter().any(|p| p == lfs_dir) {
+                paths.insert(0, lfs_dir.to_path_buf());
+                if let Ok(joined) = std::env::join_paths(paths) {
+                    cmd.env("PATH", joined);
+                }
+            }
+        }
+    }
+    cmd
+}
+
+pub(crate) fn git_lfs_available() -> bool {
+    git_with_lfs_path()
+        .args(["lfs", "version"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 fn is_lfs_pointer(path: &Path) -> bool {
+    use std::io::Read;
     let Ok(meta) = std::fs::metadata(path) else {
         return false;
     };
-    if meta.len() > 2048 {
+    if !meta.is_file() || meta.len() < 80 || meta.len() > 1024 {
         return false;
     }
-    let ext = path
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    if !LFS_EXTS.contains(&ext.as_str()) {
+    let Ok(mut f) = std::fs::File::open(path) else {
         return false;
-    }
-    std::fs::read_to_string(path)
-        .is_ok_and(|text| text.contains("git-lfs.github.com/spec/v1"))
+    };
+    let mut header = [0u8; 64];
+    let Ok(n) = f.read(&mut header) else {
+        return false;
+    };
+    std::str::from_utf8(&header[..n])
+        .is_ok_and(|s| s.starts_with("version https://git-lfs.github.com/spec/v1"))
 }
 
-fn lfs_pending(folder: &Path) -> bool {
-    if git_lfs_available() {
-        return false;
-    }
+pub(crate) fn has_lfs_pointers(folder: &Path) -> bool {
     let ga = folder.join(".gitattributes");
     if !ga.is_file()
         || !std::fs::read_to_string(&ga).is_ok_and(|t| t.to_lowercase().contains("lfs"))
@@ -582,6 +638,10 @@ fn lfs_pending(folder: &Path) -> bool {
     }
     let mut budget = 0usize;
     sample_lfs_pointers(folder, 0, &mut budget)
+}
+
+fn lfs_pending(folder: &Path) -> bool {
+    has_lfs_pointers(folder)
 }
 
 fn sample_lfs_pointers(dir: &Path, depth: usize, budget: &mut usize) -> bool {
@@ -644,6 +704,7 @@ fn repo_id_of(folder: &Path) -> String {
 
 pub fn analyze(db_path: &Path) -> Result<StackAnalysis, String> {
     let base = PathBuf::from(crate::settings::github_dir());
+    let base_key = base.display().to_string();
     let dirs = local::existing_dirs();
     let downloaded_model_ids: HashSet<String> = crate::models::list_downloaded()
         .into_iter()
@@ -651,7 +712,6 @@ pub fn analyze(db_path: &Path) -> Result<StackAnalysis, String> {
         .collect();
     let downloaded_dirs: Vec<String> = dirs.clone();
 
-    let mut reports = Vec::new();
     let mut lfs_folders = Vec::new();
     let mut dep_folders: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut domain_hits: HashMap<&'static str, DomainHit> = HashMap::new();
@@ -659,49 +719,85 @@ pub fn analyze(db_path: &Path) -> Result<StackAnalysis, String> {
     let skip_folder = |dir: &str| -> bool {
         let n = norm(dir);
         dir.starts_with('_')
-            || matches!(n.as_str(), "aimodels" | "huggingface" | "skills" | "refs" | "datasets" | "downloads")
+            || matches!(
+                n.as_str(),
+                "aimodels" | "huggingface" | "skills" | "refs" | "datasets" | "downloads"
+            )
     };
 
-    for dir in dirs {
-        if skip_folder(&dir) {
-            continue;
-        }
-        let folder = base.join(&dir);
-        if !folder.is_dir() {
-            continue;
-        }
-        let mut report = LocalStackReport {
-            folder: dir.clone(),
-            repo_id: repo_id_of(&folder),
-            ..Default::default()
-        };
-        let mut found: Vec<(Vec<String>, Vec<String>)> = Vec::new();
-        walk_manifests(&folder, 0, &mut found);
-        for (stacks, deps) in found {
-            for s in stacks {
-                if !report.stacks.contains(&s) {
-                    report.stacks.push(s);
-                }
+    let cached_reports = SCAN_CACHE
+        .lock()
+        .ok()
+        .and_then(|guard| {
+            guard.as_ref().and_then(|(at, k, reps)| {
+                (at.elapsed() < SCAN_CACHE_TTL && k == &base_key && reps.len() == dirs.len())
+                    .then(|| reps.clone())
+            })
+        });
+
+    let reports: Vec<LocalStackReport> = if let Some(reps) = cached_reports {
+        reps
+    } else {
+        let candidates: Vec<String> = dirs
+            .into_iter()
+            .filter(|d| !skip_folder(d) && base.join(d).is_dir())
+            .collect();
+        let next = AtomicUsize::new(0);
+        let results: Mutex<Vec<LocalStackReport>> = Mutex::new(Vec::with_capacity(candidates.len()));
+        std::thread::scope(|s| {
+            for _ in 0..STACK_WORKERS {
+                s.spawn(|| loop {
+                    let idx = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(dir) = candidates.get(idx) else {
+                        break;
+                    };
+                    let folder = base.join(dir);
+                    let mut report = LocalStackReport {
+                        folder: dir.clone(),
+                        repo_id: repo_id_of(&folder),
+                        ..Default::default()
+                    };
+                    let mut found: Vec<(Vec<String>, Vec<String>)> = Vec::new();
+                    walk_manifests(&folder, 0, &mut found);
+                    for (stacks, deps) in found {
+                        for st in stacks {
+                            if !report.stacks.contains(&st) {
+                                report.stacks.push(st);
+                            }
+                        }
+                        for d in deps {
+                            let key = normalize_dep(&d);
+                            if key.len() < 3 || key.len() > MAX_DEP_LEN {
+                                continue;
+                            }
+                            if !report.dependencies.contains(&key) {
+                                report.dependencies.push(key);
+                            }
+                        }
+                    }
+                    report.lfs_issue = lfs_pending(&folder);
+                    results.lock().unwrap().push(report);
+                });
             }
-            for d in deps {
-                let key = normalize_dep(&d);
-                if key.len() < 3 || key.len() > MAX_DEP_LEN {
-                    continue;
-                }
-                if !report.dependencies.contains(&key) {
-                    report.dependencies.push(key.clone());
-                }
-                dep_folders
-                    .entry(key.clone())
-                    .or_default()
-                    .push(dir.clone());
-            }
+        });
+        let mut reps = results.into_inner().unwrap();
+        reps.sort_by(|a, b| a.folder.cmp(&b.folder));
+        if let Ok(mut guard) = SCAN_CACHE.lock() {
+            *guard = Some((Instant::now(), base_key, reps.clone()));
         }
-        report.lfs_issue = lfs_pending(&folder);
+        reps
+    };
+
+    for report in &reports {
+        for key in &report.dependencies {
+            dep_folders
+                .entry(key.clone())
+                .or_default()
+                .push(report.folder.clone());
+        }
         if report.lfs_issue {
-            lfs_folders.push(dir.clone());
+            lfs_folders.push(report.folder.clone());
         }
-        reports.push(report);
     }
 
     let conn = db::open(db_path).ok();
@@ -824,10 +920,36 @@ pub fn analyze(db_path: &Path) -> Result<StackAnalysis, String> {
 // Correção de Git LFS
 // ---------------------------------------------------------------------------
 
+fn winget_command() -> std::process::Command {
+    #[cfg(windows)]
+    let bin = {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            let candidate = PathBuf::from(local).join(r"Microsoft\WindowsApps\winget.exe");
+            if candidate.is_file() {
+                candidate
+            } else {
+                PathBuf::from("winget")
+            }
+        } else {
+            PathBuf::from("winget")
+        }
+    };
+    #[cfg(not(windows))]
+    let bin = PathBuf::from("winget");
+
+    let mut cmd = std::process::Command::new(bin);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    cmd
+}
+
 fn run_lfs_pull(folder: &str) -> Result<(), String> {
     let base = crate::settings::github_dir();
     let target = PathBuf::from(&base).join(folder);
-    let out = std::process::Command::new("git")
+    let out = git_with_lfs_path()
         .args(["lfs", "pull"])
         .current_dir(&target)
         .stdout(std::process::Stdio::null())
@@ -850,7 +972,7 @@ pub fn fix_lfs(db_path: &Path) -> Result<LfsFixReport, String> {
         message: String::new(),
     };
     if !report.git_lfs_installed {
-        let out = std::process::Command::new("winget")
+        let out = winget_command()
             .args([
                 "install",
                 "--id",
@@ -870,6 +992,11 @@ pub fn fix_lfs(db_path: &Path) -> Result<LfsFixReport, String> {
                 String::from_utf8_lossy(&out.stderr).trim()
             ));
         }
+        let _ = git_with_lfs_path()
+            .args(["lfs", "install", "--skip-repo"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
         report.git_lfs_installed = true;
     }
     if analysis.lfs_folders.is_empty() {
@@ -972,5 +1099,32 @@ mod tests {
                 assert_eq!(id.split('/').count(), 2, "essencial inválido: {id}");
             }
         }
+    }
+
+    #[test]
+    fn detects_lfs_pointers_even_when_git_lfs_is_installed() {
+        let root = std::env::temp_dir().join(format!(
+            "gittrend-lfs-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        assert!(!has_lfs_pointers(&root));
+        std::fs::write(root.join(".gitattributes"), "*.bin filter=lfs diff=lfs merge=lfs -text\n")
+            .unwrap();
+        std::fs::write(root.join("normal.bin"), vec![0u8; 256]).unwrap();
+        assert!(!has_lfs_pointers(&root));
+
+        let pointer = concat!(
+            "version https://git-lfs.github.com/spec/v1\n",
+            "oid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n",
+            "size 12345\n"
+        );
+        std::fs::write(root.join("weights.bin"), pointer).unwrap();
+        assert!(has_lfs_pointers(&root));
+        assert!(lfs_pending(&root));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -489,36 +489,120 @@ pub struct ModelFiles {
     pub light_count: usize,
     pub full_count: usize,
     pub is_dataset: bool,
+    /// Quantizacoes ou variantes de peso detectadas (ex: GGUF Q4_K_M, Q8_0, FP16)
+    pub quantizations: Vec<(String, u64)>,
+    /// Estimativa pratica de VRAM para rodar o modelo principal (ou a quantizacao recomendada)
+    pub vram_hint: String,
+}
+
+fn compute_vram_and_quants(files: &[(String, u64)], is_dataset: bool) -> (Vec<(String, u64)>, String) {
+    if is_dataset {
+        return (Vec::new(), String::new());
+    }
+    let mut quants: Vec<(String, u64)> = files
+        .iter()
+        .filter(|(f, _)| f.to_lowercase().ends_with(".gguf"))
+        .map(|(f, sz)| (f.clone(), *sz))
+        .collect();
+    quants.sort_by_key(|(_, sz)| *sz);
+
+    let ref_bytes: u64 = if !quants.is_empty() {
+        quants
+            .iter()
+            .find(|(f, _)| {
+                let low = f.to_lowercase();
+                low.contains("q4_k_m") || low.contains("q4_0") || low.contains("q5_k_m")
+            })
+            .or_else(|| quants.iter().find(|(_, sz)| *sz > 100 * 1024 * 1024))
+            .or_else(|| quants.first())
+            .map(|(_, sz)| *sz)
+            .unwrap_or(0)
+    } else {
+        let safetensors_sum: u64 = files
+            .iter()
+            .filter(|(f, _)| f.to_lowercase().ends_with(".safetensors"))
+            .map(|(_, sz)| *sz)
+            .sum();
+        if safetensors_sum > 0 {
+            safetensors_sum
+        } else {
+            files.iter().filter(|(f, _)| is_weight(f)).map(|(_, sz)| *sz).sum()
+        }
+    };
+
+    if ref_bytes == 0 {
+        return (quants, String::new());
+    }
+    let gb = (ref_bytes as f64 / (1024.0 * 1024.0 * 1024.0)) * 1.2;
+    let hint = if gb <= 4.0 {
+        format!("Leve (~{gb:.1} GB VRAM, roda em qualquer GPU moderna ou CPU)")
+    } else if gb <= 8.5 {
+        format!("Médio (~{gb:.1} GB VRAM, cabe em GPU de 8 GB+)")
+    } else if gb <= 12.5 {
+        format!("Pesado (~{gb:.1} GB VRAM, pede GPU de 12 GB+)")
+    } else if gb <= 24.5 {
+        format!("Entusiasta (~{gb:.1} GB VRAM, pede GPU de 24 GB como RTX 3090/4090)")
+    } else {
+        format!("Servidor (~{gb:.0} GB VRAM, exige multi-GPU ou quantização menor)")
+    };
+    (quants, hint)
 }
 
 pub fn files(http: &Client, id: &str) -> Result<ModelFiles, String> {
-    let mut req = http
-        .get(format!("https://huggingface.co/api/models/{id}"))
-        .query(&[("blobs", "true")]);
-    if let Some(token) = crate::settings::hf_token() {
-        req = req.bearer_auth(token);
+    let token = crate::settings::hf_token();
+    let fetch_model = |tok: Option<&str>| -> Result<reqwest::blocking::Response, String> {
+        let mut req = http
+            .get(format!("https://huggingface.co/api/models/{id}"))
+            .query(&[("blobs", "true")]);
+        if let Some(t) = tok {
+            req = req.bearer_auth(t);
+        }
+        req.send()
+            .map_err(|e| format!("Não foi possível consultar item no Hugging Face: {e}"))
+    };
+
+    let mut resp = fetch_model(token.as_deref())?;
+    if matches!(resp.status().as_u16(), 401 | 403) {
+        if let Some(tok) = token.as_deref() {
+            let _ = ensure_gated_access(http, id, tok, false);
+            resp = fetch_model(Some(tok))?;
+        } else {
+            return Err(format!(
+                "O modelo {id} é restrito (gated) no Hugging Face. Configure seu HF_TOKEN em E:\\REPOSITORIOS\\AI_MODELS\\token para autoaceitar os termos."
+            ));
+        }
     }
-    let resp = req
-        .send()
-        .map_err(|e| format!("Não foi possível consultar item no Hugging Face: {e}"))?;
+
     let (v, is_dataset) = if resp.status().is_success() {
         let val: serde_json::Value = resp
             .json()
             .map_err(|e| format!("JSON de modelo inválido: {e}"))?;
         (val, false)
+    } else if matches!(resp.status().as_u16(), 401 | 403) {
+        return Err(format!(
+            "Acesso negado ao modelo restrito {id} (401/403). Verifique se sua conta Hugging Face aceitou os termos em https://huggingface.co/{id}"
+        ));
     } else {
         let mut d_req = http
             .get(format!("https://huggingface.co/api/datasets/{id}"))
             .query(&[("blobs", "true")]);
-        if let Some(token) = crate::settings::hf_token() {
-            d_req = d_req.bearer_auth(token);
+        if let Some(tok) = token.as_deref() {
+            d_req = d_req.bearer_auth(tok);
         }
         let d_resp = d_req
             .send()
             .map_err(|e| format!("Não foi possível consultar dataset no Hugging Face: {e}"))?;
+        if matches!(d_resp.status().as_u16(), 401 | 403) {
+            if let Some(tok) = token.as_deref() {
+                let _ = ensure_gated_access(http, id, tok, true);
+            }
+            return Err(format!(
+                "O dataset {id} é restrito (gated) no Hugging Face (401/403)."
+            ));
+        }
         let d_resp = d_resp
             .error_for_status()
-            .map_err(|e| format!("Não foi possível listar arquivos do item: {e}"))?;
+            .map_err(|e| format!("Item '{id}' não encontrado como modelo nem como dataset no Hugging Face: {e}"))?;
         let val: serde_json::Value = d_resp
             .json()
             .map_err(|e| format!("JSON de dataset inválido: {e}"))?;
@@ -536,6 +620,7 @@ pub fn files(http: &Client, id: &str) -> Result<ModelFiles, String> {
         })
         .collect();
     let light: Vec<_> = files.iter().filter(|(f, _)| !is_weight(f)).collect();
+    let (quantizations, vram_hint) = compute_vram_and_quants(&files, is_dataset);
     Ok(ModelFiles {
         id: id.into(),
         gated: v["gated"].as_bool().unwrap_or(false) || v["gated"].is_string(),
@@ -545,6 +630,8 @@ pub fn files(http: &Client, id: &str) -> Result<ModelFiles, String> {
         full_count: files.len(),
         files,
         is_dataset,
+        quantizations,
+        vram_hint,
     })
 }
 
@@ -625,6 +712,16 @@ pub fn ensure_gated_access(
 
 /// Baixa o modelo para <pasta HF>/<autor>__<nome>. `full = false` pula os pesos.
 pub fn download(http: &Client, id: &str, full: bool) -> Result<(), String> {
+    download_with_callback(http, id, full, None)
+}
+
+/// Baixa o modelo/dataset em background e aciona `on_done(ok, msg)` apenas ao concluir.
+pub fn download_with_callback(
+    http: &Client,
+    id: &str,
+    full: bool,
+    on_done: Option<Box<dyn FnOnce(bool, &str) + Send + 'static>>,
+) -> Result<(), String> {
     let job = format!("hf:{id}");
     if crate::downloads::is_running(&job) {
         return Err("Esse modelo já está sendo baixado.".into());
@@ -747,23 +844,30 @@ pub fn download(http: &Client, id: &str, full: bool) -> Result<(), String> {
             }
         }
         let saved = chosen.len().saturating_sub(errors.len()).saturating_sub(skipped);
-        if errors.is_empty() || saved > 0 {
-            crate::downloads::finish(
-                &job,
+        let (ok, msg) = if errors.is_empty() {
+            (
                 true,
                 format!(
-                    "{} arquivos salvos; {skipped} já existentes preservados. Pasta: {}{}",
-                    saved,
-                    folder.display(),
-                    if errors.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" (avisos em {} arquivo(s): {})", errors.len(), errors.join("; "))
-                    }
+                    "{saved} arquivos salvos; {skipped} já existentes preservados. Pasta: {}",
+                    folder.display()
                 ),
-            );
+            )
+        } else if saved > 0 || skipped > 0 {
+            (
+                false,
+                format!(
+                    "Download incompleto ({saved} salvos, {skipped} preservados, {} falha(s): {}). Pasta: {}",
+                    errors.len(),
+                    errors.join("; "),
+                    folder.display()
+                ),
+            )
         } else {
-            crate::downloads::finish(&job, false, errors.join(" | "));
+            (false, errors.join(" | "))
+        };
+        crate::downloads::finish(&job, ok, msg.clone());
+        if let Some(cb) = on_done {
+            cb(ok, &msg);
         }
     });
     Ok(())

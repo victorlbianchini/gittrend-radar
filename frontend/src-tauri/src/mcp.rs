@@ -31,16 +31,16 @@ fn sync_script() -> PathBuf {
 }
 
 fn tools() -> Value {
-    let domain = json!({"type":"string","enum":["github","modelos","skills"],"description":"github = repositorios; modelos = Hugging Face; skills = skills de agentes (SKILL.md)"});
+    let domain = json!({"type":"string","enum":["github","mcp","modelos","datasets","skills"],"description":"github = repositorios; mcp = servidores MCP; modelos = Hugging Face; datasets = datasets HF; skills = skills de agentes (SKILL.md)"});
     json!([
-      {"name":"git_search_tops","description":format!("Tops e novidades do dia do GitTrend Radar (GitHub Trending, modelos em alta no Hugging Face, skills mais instaladas). {UNTRUSTED}"),
+      {"name":"git_search_tops","description":format!("Tops e novidades do dia do GitTrend Radar (GitHub Trending, Servidores MCP, modelos e datasets em alta no Hugging Face, skills mais instaladas). {UNTRUSTED}"),
        "inputSchema":{"type":"object","properties":{"dominio":domain,"modo":{"type":"string","enum":["tops","novidades"],"default":"tops"},"limite":{"type":"integer","minimum":1,"maximum":50,"default":15}},"required":["dominio"]}},
-      {"name":"git_search_buscar","description":format!("Busca em TODO o GitHub publico, em todos os modelos do Hugging Face ou nos catalogos de skills. A fonte limita resultados por busca. {UNTRUSTED}"),
+      {"name":"git_search_buscar","description":format!("Busca em TODO o GitHub publico, Servidores MCP, em todos os modelos/datasets do Hugging Face ou nos catalogos de skills. A fonte limita resultados por busca. {UNTRUSTED}"),
        "inputSchema":{"type":"object","properties":{"dominio":domain,"busca":{"type":"string","minLength":2},"limite":{"type":"integer","minimum":1,"maximum":50,"default":15}},"required":["dominio","busca"]}},
       {"name":"git_search_instalar_skill","description":"Instala uma skill (pasta inteira com SKILL.md) direto no ecossistema de agentes em %USERPROFILE%\\.agents\\skills\\<nome> e roda sync-indexes.py. Nunca substitui skill existente com o mesmo nome. Use repo e nome vindos de git_search_buscar/git_search_tops (dominio skills).",
        "inputSchema":{"type":"object","properties":{"repo":{"type":"string","description":"dono/repositorio onde a skill esta"},"nome":{"type":"string","description":"nome da skill"},"caminho":{"type":"string","description":"pasta da skill no repo, se conhecida"}},"required":["repo","nome"]}},
-      {"name":"git_search_pedir_download","description":"Pede o download de um repositorio do GitHub (para a pasta GitHub configurada) ou de um modelo do Hugging Face. NAO baixa na hora: o pedido aparece no GitTrend Radar e so executa quando o Victor aprovar.",
-       "inputSchema":{"type":"object","properties":{"tipo":{"type":"string","enum":["repositorio","modelo"]},"id":{"type":"string","description":"dono/nome"},"completo":{"type":"boolean","default":false,"description":"modelo: incluir pesos (pode ter varios GB)"},"motivo":{"type":"string","description":"por que o agente quer este download"}},"required":["tipo","id"]}},
+      {"name":"git_search_pedir_download","description":"Pede o download de um repositorio do GitHub (para a pasta GitHub configurada), de um modelo ou de um dataset do Hugging Face. NAO baixa na hora: o pedido aparece no GitTrend Radar e so executa quando o Victor aprovar.",
+       "inputSchema":{"type":"object","properties":{"tipo":{"type":"string","enum":["repositorio","modelo","dataset"]},"id":{"type":"string","description":"dono/nome"},"completo":{"type":"boolean","default":false,"description":"modelo/dataset: incluir pesos ou dados completos (pode ter varios GB)"},"motivo":{"type":"string","description":"por que o agente quer este download"}},"required":["tipo","id"]}},
       {"name":"git_search_pedidos","description":"Lista os pedidos de download feitos por agentes e o status de cada um (pending, running, done, rejected, error).",
        "inputSchema":{"type":"object","properties":{}}},
       {"name":"git_search_atualizar_repos","description":"Roda git pull --rebase em TODOS os repositorios git ja baixados na pasta GitHub configurada e resume o resultado (atualizados, em dia, erros). Nao baixa nada novo.",
@@ -91,6 +91,17 @@ fn tops(db_path: &Path, args: &Value) -> Result<Value, String> {
                 .collect();
             json!({"data_coleta":latest,"itens":list})
         }
+        "mcp" => {
+            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let q = if news {
+                format!("mcp server in:name,description created:>={today}")
+            } else {
+                "mcp server in:name,description".to_string()
+            };
+            let sort = if news { "updated" } else { "stars" };
+            let (repos, total) = github::search_repos(&http, &q, sort, 1, n as u32)?;
+            json!({"total_na_fonte":total,"itens":repos.iter().map(|r| repo_json(r, None, "")).collect::<Vec<_>>()})
+        }
         "modelos" => {
             let list: Vec<Value> = models::fetch_trending(&http)?
                 .iter()
@@ -100,6 +111,18 @@ fn tops(db_path: &Path, args: &Value) -> Result<Value, String> {
                 .collect();
             json!({"fonte":"Hugging Face (trendingScore)","itens":list})
         }
+        "datasets" => {
+            let sort = if news { "createdAt" } else { "trendingScore" };
+            let page = datasets::search(&http, "", sort, None)?;
+            let list: Vec<Value> = page
+                .models
+                .iter()
+                .filter(|m| !news || m.is_new)
+                .take(n)
+                .map(model_json)
+                .collect();
+            json!({"fonte":"Hugging Face Datasets","itens":list})
+        }
         "skills" => {
             let list: Vec<Value> = skills::popular(&http)?
                 .iter()
@@ -108,7 +131,7 @@ fn tops(db_path: &Path, args: &Value) -> Result<Value, String> {
                 .collect();
             json!({"fonte":"catalogos de skills (instalacoes/estrelas)","aviso":if news {"Fontes de skills nao informam data de lancamento; mostrando as mais instaladas."} else {""},"itens":list})
         }
-        _ => return Err("dominio deve ser github, modelos ou skills".into()),
+        _ => return Err("dominio deve ser github, mcp, modelos, datasets ou skills".into()),
     })
 }
 
@@ -124,14 +147,23 @@ fn search(args: &Value) -> Result<Value, String> {
             let (repos, total) = github::search_repos(&http, q, "stars", 1, n as u32)?;
             json!({"total_na_fonte":total,"itens":repos.iter().map(|r| repo_json(r, None, "")).collect::<Vec<_>>()})
         }
+        "mcp" => {
+            let query = format!("{q} mcp server in:name,description");
+            let (repos, total) = github::search_repos(&http, &query, "stars", 1, n as u32)?;
+            json!({"total_na_fonte":total,"itens":repos.iter().map(|r| repo_json(r, None, "")).collect::<Vec<_>>()})
+        }
         "modelos" => {
             let page = models::search(&http, q, "downloads", None)?;
+            json!({"itens":page.models.iter().take(n).map(model_json).collect::<Vec<_>>()})
+        }
+        "datasets" => {
+            let page = datasets::search(&http, q, "downloads", None)?;
             json!({"itens":page.models.iter().take(n).map(model_json).collect::<Vec<_>>()})
         }
         "skills" => {
             json!({"itens":skills::search(&http, q)?.iter().take(n).map(skill_json).collect::<Vec<_>>()})
         }
-        _ => return Err("dominio deve ser github, modelos ou skills".into()),
+        _ => return Err("dominio deve ser github, mcp, modelos, datasets ou skills".into()),
     })
 }
 
@@ -196,17 +228,19 @@ fn request_download(db_path: &Path, args: &Value, agent: &str) -> Result<Value, 
     let kind = match args["tipo"].as_str() {
         Some("repositorio") => "repo",
         Some("modelo") => "model",
-        _ => return Err("tipo deve ser repositorio ou modelo".into()),
+        Some("dataset") => "dataset",
+        _ => return Err("tipo deve ser repositorio, modelo ou dataset".into()),
     };
     let id = id
         .strip_prefix("https://github.com/")
+        .or(id.strip_prefix("https://huggingface.co/datasets/"))
         .or(id.strip_prefix("https://huggingface.co/"))
         .unwrap_or(id);
     crate::validate_model_id(id)?;
     if kind == "repo" && id.split('/').count() != 2 {
         return Err("Repositorio deve estar no formato dono/nome.".into());
     }
-    let full = kind == "model" && args["completo"].as_bool().unwrap_or(false);
+    let full = (kind == "model" || kind == "dataset") && args["completo"].as_bool().unwrap_or(false);
     let reason: String = args["motivo"]
         .as_str()
         .unwrap_or_default()
@@ -355,6 +389,9 @@ pub fn run() {
     let _ = std::fs::create_dir_all(&dir);
     crate::settings::init(dir.join("settings.json"));
     let db_path = dir.join("gittrend.db");
+    if let Ok(conn) = db::open(&db_path) {
+        let _ = db::recover_stale_agent_requests(&conn);
+    }
     let mut agent = String::from("agente");
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
