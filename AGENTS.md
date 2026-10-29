@@ -19,7 +19,7 @@ App desktop (Tauri 2 + Rust + React) que mostra as novidades diárias do GitHub 
   - `summaries.rs` fila Ollama automática em cada página, tradução/resumo PT-BR, cache 7 dias, dedup/retry, máximo 500 ativos; documentos limitados a 1 MiB e tratados como dados inertes
   - Busca global: `search_github`, `search_hf`, `search_skills`; resultados GitHub usam `period = 'search'`, nunca contam como novidade diária
   - Downloads HF: leve sem pesos / completo; arquivos existentes preservados. Skills: `<pasta>/<dono>/<repo>/<skill>`; staging só vira destino final quando completo
-  - `mcp.rs` servidor MCP stdio (`gittrend-radar.exe --mcp`), registrado no multiplexador do ALFRED como `git-search`: `git_search_tops`, `git_search_buscar`, `git_search_instalar_skill`, `git_search_pedir_download`, `git_search_pedidos`
+  - `mcp.rs` servidor MCP stdio (`gittrend-radar.exe --mcp`), registrado no multiplexador do ALFRED como `git-search`: `git_search_tops`, `git_search_buscar`, `git_search_instalar_skill`, `git_search_pedir_download`, `git_search_pedidos`, `git_search_baixados_recentes` (o que foi baixado, com data/hora = criação da pasta; `dias=1` = hoje)
   - Pedidos de agentes: tabela `agent_requests` (pending→running→done/error/rejected); aba "Pedidos dos agentes" no app aprova/recusa
   - Favoritos: tabela `favorites`; Favoritos/Baixados vêm de `db::all_latest` (todos os repos já vistos, não só o Trending do dia)
 

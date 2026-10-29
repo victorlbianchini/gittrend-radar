@@ -47,6 +47,8 @@ fn tools() -> Value {
        "inputSchema":{"type":"object","properties":{}}},
       {"name":"git_search_biblioteca","description":"Resumo da biblioteca local: quantos repositorios git, modelos, datasets e skills estao baixados, e quantos pedidos de agentes estao pendentes de aprovacao.",
        "inputSchema":{"type":"object","properties":{}}},
+      {"name":"git_search_baixados_recentes","description":"Lista o que o Victor baixou (repositorios GitHub, modelos, datasets HF e skills), do mais recente para o mais antigo, com data e hora local do download (criacao da pasta de destino). Use para 'veja os downloads de hoje' e aprender ou construir com eles. dias=1 = so hoje.",
+       "inputSchema":{"type":"object","properties":{"dias":{"type":"integer","minimum":1,"maximum":365,"default":1,"description":"1 = hoje, 7 = ultimos 7 dias"},"limite":{"type":"integer","minimum":1,"maximum":50,"default":15}}}},
       {"name":"git_search_sugestoes","description":"Analisa os repositorios ja baixados (manifestos, dependencias, Git LFS) e devolve sugestoes automaticas de download derivadas do conhecimento do ecossistema: repos/modelos complementares que faltam na maquina. Nada baixa sozinho; use git_search_pedir_download para pedir um item sugerido.",
        "inputSchema":{"type":"object","properties":{}}}
     ])
@@ -355,6 +357,75 @@ fn suggestions(db_path: &Path) -> Result<Value, String> {
     }))
 }
 
+fn skill_dirs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if depth == 0 {
+        return;
+    }
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.join("SKILL.md").is_file() {
+            out.push(p);
+        } else if p.is_dir() {
+            skill_dirs(&p, depth - 1, out);
+        }
+    }
+}
+
+/// Data do download = criacao da pasta de destino (clone/HF/staging criam a pasta na hora).
+// ponytail: sem tabela de log; pasta movida/copiada entre discos ganha nova data de criacao.
+fn collect_recent(
+    roots: &[(&str, PathBuf)],
+    skills_root: &Path,
+    since: chrono::NaiveDateTime,
+) -> Vec<(chrono::DateTime<chrono::Local>, String, PathBuf)> {
+    let mut found: Vec<(String, PathBuf)> = Vec::new();
+    for (kind, dir) in roots {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            if e.path().is_dir() && !(*kind == "modelo" && e.file_name() == "datasets") {
+                found.push((kind.to_string(), e.path()));
+            }
+        }
+    }
+    let mut skills = Vec::new();
+    skill_dirs(skills_root, 3, &mut skills);
+    found.extend(skills.into_iter().map(|p| ("skill".to_string(), p)));
+    let mut items: Vec<_> = found
+        .into_iter()
+        .filter_map(|(kind, path)| {
+            let t: chrono::DateTime<chrono::Local> =
+                std::fs::metadata(&path).and_then(|m| m.created()).ok()?.into();
+            (t.naive_local() >= since).then_some((t, kind, path))
+        })
+        .collect();
+    items.sort_by(|a, b| b.0.cmp(&a.0));
+    items
+}
+
+fn recent_downloads(args: &Value) -> Result<Value, String> {
+    let days = args["dias"].as_i64().unwrap_or(1).clamp(1, 365);
+    let since = (chrono::Local::now().date_naive() - chrono::Duration::days(days - 1))
+        .and_hms_opt(0, 0, 0)
+        .unwrap();
+    let hf = crate::settings::hf_dir();
+    let roots = [
+        ("repositorio", crate::settings::github_dir()),
+        ("modelo", hf.clone()),
+        ("dataset", hf.join("datasets")),
+    ];
+    let items = collect_recent(&roots, &crate::settings::skills_dir(), since);
+    let total = items.len();
+    let list: Vec<Value> = items
+        .into_iter()
+        .take(limit(args))
+        .map(|(t, kind, path)| {
+            json!({"baixado_em": t.format("%Y-%m-%d %H:%M:%S").to_string(), "tipo": kind,
+                   "nome": path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                   "pasta": path.display().to_string()})
+        })
+        .collect();
+    Ok(json!({"desde": since.format("%Y-%m-%d %H:%M").to_string(), "total": total, "itens": list}))
+}
+
 /// Trata uma mensagem JSON-RPC. `None` para notificacoes (sem resposta).
 pub fn handle(db_path: &Path, msg: &Value, agent: &mut String) -> Option<Value> {
     let id = msg.get("id").cloned()?;
@@ -392,6 +463,7 @@ pub fn handle(db_path: &Path, msg: &Value, agent: &mut String) -> Option<Value> 
                 "git_search_atualizar_repos" => update_repos(),
                 "git_search_biblioteca" => library(db_path),
                 "git_search_sugestoes" => suggestions(db_path),
+                "git_search_baixados_recentes" => recent_downloads(&args),
                 _ => return Some(fail(-32602, &format!("Ferramenta desconhecida: {name}"))),
             };
             match result {
@@ -440,6 +512,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn recent_downloads_sorted_and_filtered() {
+        let root = std::env::temp_dir().join(format!("gtr_recent_{}", std::process::id()));
+        let gh = root.join("gh");
+        let sk = root.join("sk").join("dono").join("repo").join("pdf");
+        std::fs::create_dir_all(gh.join("antigo")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::create_dir_all(gh.join("novo")).unwrap();
+        std::fs::create_dir_all(&sk).unwrap();
+        std::fs::write(sk.join("SKILL.md"), "x").unwrap();
+        let today = chrono::Local::now().date_naive().and_hms_opt(0, 0, 0).unwrap();
+        let items = collect_recent(&[("repositorio", gh.clone())], &root.join("sk"), today);
+        let names: Vec<_> = items.iter().map(|(_, k, p)| (k.as_str(), p.file_name().unwrap().to_string_lossy().into_owned())).collect();
+        assert_eq!(names, [("skill", "pdf".into()), ("repositorio", "novo".into()), ("repositorio", "antigo".into())]);
+        let future = today + chrono::Duration::days(1);
+        assert!(collect_recent(&[("repositorio", gh)], &root.join("sk"), future).is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn protocol_and_download_requests_need_approval() {
         let dir = std::env::temp_dir().join(format!("gtr_mcp_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -460,7 +551,7 @@ mod tests {
             &mut agent,
         )
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 8);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 9);
 
         let call = |args: Value| {
             handle(&db_path, &json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"git_search_pedir_download","arguments":args}}), &mut String::from("claude-code")).unwrap()
